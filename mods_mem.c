@@ -1,22 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0
-/*
- * This file is part of NVIDIA MODS kernel driver.
- *
- * Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved.
- *
- * NVIDIA MODS kernel driver is free software: you can redistribute it and/or
- * modify it under the terms of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * NVIDIA MODS kernel driver is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with NVIDIA MODS kernel driver.
- * If not, see <http://www.gnu.org/licenses/>.
- */
+// SPDX-License-Identifier: GPL-2.0-only
+/* Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved. */
 
 #include "mods_internal.h"
 
@@ -568,6 +551,9 @@ static int restore_cache_one_chunk(struct page *p_page, u8 order)
 
 		if (likely(!final_err))
 			final_err = err;
+
+		/* Avoid superficial lockups */
+		cond_resched();
 	}
 
 	return final_err;
@@ -2496,7 +2482,8 @@ static void clear_contiguous_cache(struct mods_client *client,
 		asm volatile("dc civac, %0" : : "r" (cur) : "memory");
 
 		/* Avoid superficial lockups */
-		cond_resched();
+		if (!(cur & ((1U << 16) - 1U)))
+			cond_resched();
 	} while (cur += d_size, cur < end);
 	asm volatile("dsb sy" : : : "memory");
 

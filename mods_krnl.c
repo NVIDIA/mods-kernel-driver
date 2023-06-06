@@ -1,22 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0
-/*
- * This file is part of NVIDIA MODS kernel driver.
- *
- * Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved.
- *
- * NVIDIA MODS kernel driver is free software: you can redistribute it and/or
- * modify it under the terms of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * NVIDIA MODS kernel driver is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with NVIDIA MODS kernel driver.
- * If not, see <http://www.gnu.org/licenses/>.
- */
+// SPDX-License-Identifier: GPL-2.0-only
+/* Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved. */
 
 #include "mods_internal.h"
 
@@ -557,11 +540,6 @@ static int __init mods_init_module(void)
 	rc = smmu_driver_init();
 	if (rc < 0)
 		return rc;
-
-#if defined(MODS_HAS_PROD)
-	/* tegra prod */
-	mods_tegra_prod_init(&mods_dev);
-#endif
 
 #if defined(CONFIG_DMA_ENGINE)
 	rc = mods_init_dma();
@@ -2592,7 +2570,7 @@ static long mods_krnl_ioctl(struct file  *fp,
 			   MODS_GET_RESET_HANDLE);
 		break;
 #endif
-#if defined(MODS_HAS_PROD)
+#if defined(MODS_HAS_TEGRA)
 	case MODS_ESC_BPMP_SET_PCIE_STATE:
 		MODS_IOCTL(MODS_ESC_BPMP_SET_PCIE_STATE,
 			   esc_mods_bpmp_set_pcie_state,
@@ -2604,8 +2582,6 @@ static long mods_krnl_ioctl(struct file  *fp,
 			   esc_mods_bpmp_init_pcie_ep_pll,
 			   MODS_INIT_PCIE_EP_PLL);
 		break;
-#endif
-#if defined(MODS_HAS_TEGRA)
 	case MODS_ESC_DMA_ALLOC_COHERENT:
 		MODS_IOCTL(MODS_ESC_DMA_ALLOC_COHERENT,
 			   esc_mods_dma_alloc_coherent,
@@ -2667,13 +2643,6 @@ static long mods_krnl_ioctl(struct file  *fp,
 		MODS_IOCTL(MODS_MODS_ESC_DMA_TX_WAIT,
 			   esc_mods_dma_wait,
 			   MODS_DMA_WAIT_DESC);
-		break;
-#endif
-#ifdef CONFIG_TEGRA_DC
-	case MODS_ESC_TEGRA_DC_CONFIG_POSSIBLE:
-		MODS_IOCTL(MODS_ESC_TEGRA_DC_CONFIG_POSSIBLE,
-				   esc_mods_tegra_dc_config_possible,
-				   MODS_TEGRA_DC_CONFIG_POSSIBLE);
 		break;
 #endif
 #if defined(MODS_HAS_TEGRA) && defined(CONFIG_NET)
@@ -2756,44 +2725,6 @@ static long mods_krnl_ioctl(struct file  *fp,
 		break;
 #endif
 
-#if defined(MODS_HAS_PROD)
-	case MODS_ESC_TEGRA_PROD_IS_SUPPORTED:
-		MODS_IOCTL(MODS_ESC_TEGRA_PROD_IS_SUPPORTED,
-			   esc_mods_tegra_prod_is_supported,
-			   MODS_TEGRA_PROD_IS_SUPPORTED);
-		break;
-
-	case MODS_ESC_TEGRA_PROD_SET_PROD_ALL:
-		MODS_IOCTL_NORETVAL(MODS_ESC_TEGRA_PROD_SET_PROD_ALL,
-				    esc_mods_tegra_prod_set_prod_all,
-				    MODS_TEGRA_PROD_SET_TUPLE);
-		break;
-
-	case MODS_ESC_TEGRA_PROD_SET_PROD_BOOT:
-		MODS_IOCTL_NORETVAL(MODS_ESC_TEGRA_PROD_SET_PROD_BOOT,
-				    esc_mods_tegra_prod_set_prod_boot,
-				    MODS_TEGRA_PROD_SET_TUPLE);
-		break;
-
-	case MODS_ESC_TEGRA_PROD_SET_PROD_BY_NAME:
-		MODS_IOCTL_NORETVAL(MODS_ESC_TEGRA_PROD_SET_PROD_BY_NAME,
-				    esc_mods_tegra_prod_set_prod_by_name,
-				    MODS_TEGRA_PROD_SET_TUPLE);
-		break;
-
-	case MODS_ESC_TEGRA_PROD_SET_PROD_EXACT:
-		MODS_IOCTL_NORETVAL(MODS_ESC_TEGRA_PROD_SET_PROD_EXACT,
-				    esc_mods_tegra_prod_set_prod_exact,
-				    MODS_TEGRA_PROD_SET_TUPLE);
-		break;
-
-	case MODS_ESC_TEGRA_PROD_ITERATE_DT:
-		MODS_IOCTL(MODS_ESC_TEGRA_PROD_ITERATE_DT,
-			   esc_mods_tegra_prod_iterate_dt,
-			   MODS_TEGRA_PROD_ITERATOR);
-		break;
-#endif
-
 #if defined(MODS_HAS_TEGRA)
 
 #ifdef CONFIG_TRUSTY
@@ -2822,11 +2753,14 @@ static long mods_krnl_ioctl(struct file  *fp,
 
 #endif
 
-#if IS_BUILTIN(CONFIG_ARM_FFA_TRANSPORT)
 	case MODS_ESC_FFA_CMD:
+#if IS_BUILTIN(CONFIG_ARM_FFA_TRANSPORT)
 		MODS_IOCTL(MODS_ESC_FFA_CMD, esc_mods_arm_ffa_cmd, MODS_FFA_PARAMS);
-		break;
+#else
+		cl_debug(DEBUG_IOCTL, "ioctl(MODS_ESC_FFA_CMD is not supported)\n");
+		err = -EINVAL;
 #endif
+		break;
 
 	case MODS_ESC_ACQUIRE_ACCESS_TOKEN:
 		MODS_IOCTL(MODS_ESC_ACQUIRE_ACCESS_TOKEN,

@@ -1,22 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
-/*
- * This file is part of NVIDIA MODS kernel driver.
- *
- * Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved.
- *
- * NVIDIA MODS kernel driver is free software: you can redistribute it and/or
- * modify it under the terms of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * NVIDIA MODS kernel driver is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with NVIDIA MODS kernel driver.
- * If not, see <http://www.gnu.org/licenses/>.
- */
+/* SPDX-License-Identifier: GPL-2.0-only WITH Linux-syscall-note */
+/* Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved. */
 
 #ifndef _UAPI_MODS_H_
 #define _UAPI_MODS_H_
@@ -25,7 +8,7 @@
 
 /* Driver version */
 #define MODS_DRIVER_VERSION_MAJOR 4
-#define MODS_DRIVER_VERSION_MINOR 17
+#define MODS_DRIVER_VERSION_MINOR 18
 #define MODS_DRIVER_VERSION ((MODS_DRIVER_VERSION_MAJOR << 8) | \
 			     ((MODS_DRIVER_VERSION_MINOR / 10) << 4) | \
 			     (MODS_DRIVER_VERSION_MINOR % 10))
@@ -2024,8 +2007,10 @@ struct MODS_BPMP_UPHY_LANE_EOM_SCAN_PARAMS {
 #define MODS_ESC_DEVICE_ALLOC_PAGES MODSIO(WR, 45, MODS_DEVICE_ALLOC_PAGES)
 /* Deprecated */
 #define MODS_ESC_DEVICE_NUMA_INFO MODSIO(WR, 46, MODS_DEVICE_NUMA_INFO)
+/* Deprecated */
 #define MODS_ESC_TEGRA_DC_CONFIG_POSSIBLE MODSIO(WR, 47, \
 						 MODS_TEGRA_DC_CONFIG_POSSIBLE)
+/* Deprecated */
 #define MODS_ESC_TEGRA_DC_SETUP_SD MODSIO(W, 48, MODS_TEGRA_DC_SETUP_SD)
 #define MODS_ESC_DMABUF_GET_PHYSICAL_ADDRESS MODSIO(WR, 49, \
 					MODS_DMABUF_GET_PHYSICAL_ADDRESS)
@@ -2093,16 +2078,22 @@ struct MODS_BPMP_UPHY_LANE_EOM_SCAN_PARAMS {
 #define MODS_ESC_LOCK_CONSOLE _IO(MODS_IOC_MAGIC, 93)
 /* Unlocks system console */
 #define MODS_ESC_UNLOCK_CONSOLE _IO(MODS_IOC_MAGIC, 94)
+/* Deprecated */
 #define MODS_ESC_TEGRA_PROD_IS_SUPPORTED MODSIO(WR, 95, \
 						MODS_TEGRA_PROD_IS_SUPPORTED)
+/* Deprecated */
 #define MODS_ESC_TEGRA_PROD_SET_PROD_ALL MODSIO(W, 96, \
 						MODS_TEGRA_PROD_SET_TUPLE)
+/* Deprecated */
 #define MODS_ESC_TEGRA_PROD_SET_PROD_BOOT MODSIO(W, 97, \
 						 MODS_TEGRA_PROD_SET_TUPLE)
+/* Deprecated */
 #define MODS_ESC_TEGRA_PROD_SET_PROD_BY_NAME MODSIO(W, 98, \
 						    MODS_TEGRA_PROD_SET_TUPLE)
+/* Deprecated */
 #define MODS_ESC_TEGRA_PROD_SET_PROD_EXACT MODSIO(W, 99, \
 						  MODS_TEGRA_PROD_SET_TUPLE)
+/* Deprecated */
 #define MODS_ESC_TEGRA_PROD_ITERATE_DT MODSIO(WR, 100, MODS_TEGRA_PROD_ITERATOR)
 #define MODS_ESC_GET_ATS_ADDRESS_RANGE MODSIO(WR, 101, \
 					      MODS_GET_ATS_ADDRESS_RANGE)

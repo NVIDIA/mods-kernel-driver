@@ -1,22 +1,5 @@
-/* SPDX-License-Identifier: GPL-2.0 */
-/*
- * This file is part of NVIDIA MODS kernel driver.
- *
- * Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved.
- *
- * NVIDIA MODS kernel driver is free software: you can redistribute it and/or
- * modify it under the terms of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * NVIDIA MODS kernel driver is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with NVIDIA MODS kernel driver.
- * If not, see <http://www.gnu.org/licenses/>.
- */
+/* SPDX-License-Identifier: GPL-2.0-only */
+/* Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved. */
 
 #ifndef _MODS_INTERNAL_H_
 #define _MODS_INTERNAL_H_
@@ -593,15 +576,12 @@ int esc_mods_register_irq_4(struct mods_client         *client,
 int esc_mods_query_irq_3(struct mods_client      *client,
 			 struct MODS_QUERY_IRQ_3 *p);
 
-#ifdef MODS_HAS_PROD
+#ifdef MODS_HAS_TEGRA
 /* bpmp uphy */
 int esc_mods_bpmp_set_pcie_state(struct mods_client *client,
 				  struct MODS_SET_PCIE_STATE *p);
 int esc_mods_bpmp_init_pcie_ep_pll(struct mods_client *client,
 				  struct MODS_INIT_PCIE_EP_PLL *p);
-#endif
-
-#ifdef MODS_HAS_TEGRA
 
 /* clock */
 int esc_mods_get_clock_handle(struct mods_client           *client,
@@ -661,11 +641,6 @@ int esc_mods_dma_async_issue_pending(struct mods_client     *client,
 				     struct MODS_DMA_HANDLE *p);
 #endif
 
-#ifdef CONFIG_TEGRA_DC
-int esc_mods_tegra_dc_config_possible(struct mods_client *client,
-				      struct MODS_TEGRA_DC_CONFIG_POSSIBLE *p);
-#endif
-
 #if defined(MODS_HAS_TEGRA) && defined(CONFIG_NET)
 int esc_mods_net_force_link(struct mods_client          *client,
 			    struct MODS_NET_DEVICE_NAME *p);
@@ -686,23 +661,6 @@ int esc_mods_adsp_start(struct mods_client *client);
 int esc_mods_adsp_stop(struct mods_client *client);
 int esc_mods_adsp_run_app(struct mods_client            *client,
 			  struct MODS_ADSP_RUN_APP_INFO *p);
-#endif
-
-#ifdef MODS_HAS_PROD
-/* prod */
-int mods_tegra_prod_init(const struct miscdevice *misc_dev);
-int esc_mods_tegra_prod_iterate_dt(struct mods_client *client,
-	struct MODS_TEGRA_PROD_ITERATOR *iterator);
-int esc_mods_tegra_prod_is_supported(struct mods_client *client,
-	struct MODS_TEGRA_PROD_IS_SUPPORTED *tuple);
-int esc_mods_tegra_prod_set_prod_all(struct mods_client *client,
-	struct MODS_TEGRA_PROD_SET_TUPLE *tuple);
-int esc_mods_tegra_prod_set_prod_boot(struct mods_client *client,
-	struct MODS_TEGRA_PROD_SET_TUPLE *tuple);
-int esc_mods_tegra_prod_set_prod_by_name(struct mods_client *client,
-	struct MODS_TEGRA_PROD_SET_TUPLE *tuple);
-int esc_mods_tegra_prod_set_prod_exact(struct mods_client *client,
-	struct MODS_TEGRA_PROD_SET_TUPLE *tuple);
 #endif
 
 #ifdef CONFIG_TRUSTY
