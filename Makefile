@@ -10,8 +10,14 @@ mods-y                           += mods_mem.o
 mods-y                           += mods_irq.o
 mods-$(CONFIG_PCI)               += mods_pci.o
 mods-$(CONFIG_ACPI)              += mods_acpi.o
-ifeq ($(CONFIG_ARM_FFA_TRANSPORT),y)
-    mods-y                       += mods_arm_ffa.o
+
+ifdef ALLOW_ARM_FFA_TRANSPORT_AS_MODULE
+    mods-$(CONFIG_ARM_FFA_TRANSPORT) += mods_arm_ffa.o
+    KBUILD_CFLAGS += -DALLOW_ARM_FFA_TRANSPORT_AS_MODULE
+else
+    ifeq ($(CONFIG_ARM_FFA_TRANSPORT),y)
+        mods-y                   += mods_arm_ffa.o
+    endif
 endif
 mods-$(CONFIG_DEBUG_FS)          += mods_debugfs.o
 mods-$(CONFIG_PPC64)             += mods_ppc64.o

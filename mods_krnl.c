@@ -24,10 +24,6 @@
 #   include <asm/msr.h>
 #endif
 
-#ifndef IS_BUILTIN
-#   define IS_BUILTIN(c) 0
-#endif
-
 /***********************************************************************
  * mods_krnl_* functions, driver interfaces called by the Linux kernel *
  ***********************************************************************/
@@ -548,7 +544,9 @@ static int __init mods_init_module(void)
 #endif
 #endif
 
-#if IS_BUILTIN(CONFIG_ARM_FFA_TRANSPORT)
+#if IS_BUILTIN(CONFIG_ARM_FFA_TRANSPORT) || \
+	(defined(ALLOW_ARM_FFA_TRANSPORT_AS_MODULE) && \
+	 IS_MODULE(CONFIG_ARM_FFA_TRANSPORT))
 	rc = mods_ffa_abi_register();
 	if (rc < 0)
 		mods_warning_printk("error on mods_ffa_abi_register returned %d\n", rc);
@@ -599,7 +597,9 @@ static void __exit mods_exit_module(void)
 	mods_shutdown_clock_api();
 #endif
 
-#if IS_BUILTIN(CONFIG_ARM_FFA_TRANSPORT)
+#if IS_BUILTIN(CONFIG_ARM_FFA_TRANSPORT) || \
+	(defined(ALLOW_ARM_FFA_TRANSPORT_AS_MODULE) && \
+	 IS_MODULE(CONFIG_ARM_FFA_TRANSPORT))
 	mods_ffa_abi_unregister();
 #endif
 	mods_info_printk("driver unloaded\n");
@@ -2754,7 +2754,9 @@ static long mods_krnl_ioctl(struct file  *fp,
 #endif
 
 	case MODS_ESC_FFA_CMD:
-#if IS_BUILTIN(CONFIG_ARM_FFA_TRANSPORT)
+#if IS_BUILTIN(CONFIG_ARM_FFA_TRANSPORT) || \
+	(defined(ALLOW_ARM_FFA_TRANSPORT_AS_MODULE) && \
+	 IS_MODULE(CONFIG_ARM_FFA_TRANSPORT))
 		MODS_IOCTL(MODS_ESC_FFA_CMD, esc_mods_arm_ffa_cmd, MODS_FFA_PARAMS);
 #else
 		cl_debug(DEBUG_IOCTL, "ioctl(MODS_ESC_FFA_CMD is not supported)\n");

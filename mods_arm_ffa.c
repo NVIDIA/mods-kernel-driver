@@ -19,12 +19,14 @@ static const struct ffa_device_id mods_ffa_device_id[] = {
 
 struct mods_ffa_ctx {
 	struct ffa_device        *ffa_dev;
-#if KERNEL_VERSION(6, 2, 0) <= MODS_KERNEL_VERSION
+#if KERNEL_VERSION(6, 1, 0) <= MODS_KERNEL_VERSION
 	const struct ffa_msg_ops *ffa_ops;
 #else
 	const struct ffa_dev_ops *ffa_ops;
 #endif
 };
+
+static DEFINE_MUTEX(mods_ffa_lock);
 
 static struct mods_ffa_ctx mods_ffa_info;
 
@@ -32,7 +34,7 @@ static int ffa_probe(struct ffa_device *ffa_dev)
 {
 	int ret = 0;
 
-#if KERNEL_VERSION(6, 2, 0) <= MODS_KERNEL_VERSION
+#if KERNEL_VERSION(6, 1, 0) <= MODS_KERNEL_VERSION
 	const struct ffa_msg_ops *ffa_ops = NULL;
 
 	if (ffa_dev->ops)
@@ -137,7 +139,9 @@ int esc_mods_arm_ffa_cmd(struct mods_client *client,
 		return err;
 	}
 
+	mutex_lock(&mods_ffa_lock);
 	err = mods_ffa_info.ffa_ops->sync_send_receive(mods_ffa_info.ffa_dev, &data);
+	mutex_unlock(&mods_ffa_lock);
 
 	switch (p->cmd) {
 	case MODS_FFA_CMD_READ_REG:
@@ -154,6 +158,10 @@ int esc_mods_arm_ffa_cmd(struct mods_client *client,
 	case MODS_FFA_CMD_READ_VER:
 		cl_debug(DEBUG_TEGRADMA, "received version from SP : 0x%llx\n",
 					  (unsigned long long)data.data1);
+		p->outdata[0] = data.data1;
+		break;
+	case MODS_FFA_CMD_SE_TESTS:
+	case MODS_FFA_CMD_SE_KEY_MOVER:
 		p->outdata[0] = data.data1;
 		break;
 	case MODS_FFA_CMD_HSS_TEST:

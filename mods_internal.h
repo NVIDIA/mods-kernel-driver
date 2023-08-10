@@ -31,6 +31,14 @@
 #define false	0
 #endif
 
+#ifndef IS_BUILTIN
+#   define IS_BUILTIN(c) 0
+#endif
+
+#ifndef IS_MODULE
+#   define IS_MODULE(c) 0
+#endif
+
 /* function return code */
 #define OK		 0
 
@@ -677,8 +685,10 @@ int esc_mods_invoke_optee_ta(struct mods_client *client,
 #endif
 
 /* MODS SP call */
-#if defined(CONFIG_ARM_FFA_TRANSPORT)
-int esc_mods_arm_ffa_cmd(struct mods_client *client,
+#if IS_BUILTIN(CONFIG_ARM_FFA_TRANSPORT) || \
+	(defined(ALLOW_ARM_FFA_TRANSPORT_AS_MODULE) && \
+	 IS_MODULE(CONFIG_ARM_FFA_TRANSPORT))
+	int esc_mods_arm_ffa_cmd(struct mods_client *client,
 			 struct MODS_FFA_PARAMS *p);
 #endif
 
@@ -722,7 +732,9 @@ int mods_bpmpipc_init(struct mods_client *client,
 void mods_bpmpipc_cleanup(void);
 #endif
 
-#if defined(CONFIG_ARM_FFA_TRANSPORT)
+#if IS_BUILTIN(CONFIG_ARM_FFA_TRANSPORT) || \
+	(defined(ALLOW_ARM_FFA_TRANSPORT_AS_MODULE) && \
+	 IS_MODULE(CONFIG_ARM_FFA_TRANSPORT))
 int mods_ffa_abi_register(void);
 void mods_ffa_abi_unregister(void);
 #endif
