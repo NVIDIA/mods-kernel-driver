@@ -4,21 +4,24 @@
 # If KERNELRELEASE is defined, we've been invoked from the
 # kernel build system and can use its language.
 ifneq ($(KERNELRELEASE),)
+
+ifdef ALLOW_ARM_FFA_TRANSPORT_AS_MODULE
+    HAVE_ARM_FFA = $(CONFIG_ARM_FFA_TRANSPORT)
+    KBUILD_CFLAGS += -DALLOW_ARM_FFA_TRANSPORT_AS_MODULE
+else
+    ifeq ($(CONFIG_ARM_FFA_TRANSPORT),y)
+        HAVE_ARM_FFA = $(CONFIG_ARM_FFA_TRANSPORT)
+    endif
+endif
+HAVE_ARM_FFA ?=
+
 obj-m                            := mods.o
 mods-y                           := mods_krnl.o
 mods-y                           += mods_mem.o
 mods-y                           += mods_irq.o
 mods-$(CONFIG_PCI)               += mods_pci.o
 mods-$(CONFIG_ACPI)              += mods_acpi.o
-
-ifdef ALLOW_ARM_FFA_TRANSPORT_AS_MODULE
-    mods-$(CONFIG_ARM_FFA_TRANSPORT) += mods_arm_ffa.o
-    KBUILD_CFLAGS += -DALLOW_ARM_FFA_TRANSPORT_AS_MODULE
-else
-    ifeq ($(CONFIG_ARM_FFA_TRANSPORT),y)
-        mods-y                   += mods_arm_ffa.o
-    endif
-endif
+mods-$(HAVE_ARM_FFA)             += mods_arm_ffa.o
 mods-$(CONFIG_DEBUG_FS)          += mods_debugfs.o
 mods-$(CONFIG_PPC64)             += mods_ppc64.o
 mods-$(CONFIG_TEGRA_IVC)         += mods_bpmpipc.o

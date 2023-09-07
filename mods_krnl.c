@@ -544,9 +544,7 @@ static int __init mods_init_module(void)
 #endif
 #endif
 
-#if IS_BUILTIN(CONFIG_ARM_FFA_TRANSPORT) || \
-	(defined(ALLOW_ARM_FFA_TRANSPORT_AS_MODULE) && \
-	 IS_MODULE(CONFIG_ARM_FFA_TRANSPORT))
+#if defined(MODS_HAS_ARM_FFA)
 	rc = mods_ffa_abi_register();
 	if (rc < 0)
 		mods_warning_printk("error on mods_ffa_abi_register returned %d\n", rc);
@@ -597,9 +595,7 @@ static void __exit mods_exit_module(void)
 	mods_shutdown_clock_api();
 #endif
 
-#if IS_BUILTIN(CONFIG_ARM_FFA_TRANSPORT) || \
-	(defined(ALLOW_ARM_FFA_TRANSPORT_AS_MODULE) && \
-	 IS_MODULE(CONFIG_ARM_FFA_TRANSPORT))
+#if defined(MODS_HAS_ARM_FFA)
 	mods_ffa_abi_unregister();
 #endif
 	mods_info_printk("driver unloaded\n");
@@ -1957,6 +1953,38 @@ static int esc_mods_write_msr(struct mods_client *client, struct MODS_MSR *p)
 }
 #endif
 
+#if defined(CONFIG_ARM) || defined(CONFIG_ARM64)
+static int esc_mods_idle(struct mods_client *client, struct MODS_IDLE *p)
+{
+	u32 i;
+
+	LOG_ENT();
+
+	switch (p->idle_method) {
+
+	case MODS_IDLE_METHOD_ARM_WFI:
+		dsb(st);
+		for (i = 0; i < p->num_loops; i++)
+			wfi();
+		break;
+
+	case MODS_IDLE_METHOD_ARM_WFE:
+		dsb(st);
+		for (i = 0; i < p->num_loops; i++)
+			wfe();
+		break;
+
+	default:
+		cl_error("unsupported idle method %u\n", p->idle_method);
+		LOG_EXT();
+		return -EINVAL;
+	}
+
+	LOG_EXT();
+	return OK;
+}
+#endif
+
 static int esc_mods_get_driver_stats(struct mods_client *client,
 				     struct MODS_GET_DRIVER_STATS *p)
 {
@@ -2665,6 +2693,11 @@ static long mods_krnl_ioctl(struct file  *fp,
 				    MODS_FLUSH_CPU_CACHE_RANGE);
 		break;
 #endif
+#if defined(CONFIG_ARM) || defined(CONFIG_ARM64)
+	case MODS_ESC_IDLE:
+		MODS_IOCTL_NORETVAL(MODS_ESC_IDLE, esc_mods_idle, MODS_IDLE);
+		break;
+#endif
 #if defined(MODS_HAS_TEGRA) && defined(CONFIG_DMA_SHARED_BUFFER)
 	case MODS_ESC_DMABUF_GET_PHYSICAL_ADDRESS:
 		MODS_IOCTL(MODS_ESC_DMABUF_GET_PHYSICAL_ADDRESS,
@@ -2754,9 +2787,7 @@ static long mods_krnl_ioctl(struct file  *fp,
 #endif
 
 	case MODS_ESC_FFA_CMD:
-#if IS_BUILTIN(CONFIG_ARM_FFA_TRANSPORT) || \
-	(defined(ALLOW_ARM_FFA_TRANSPORT_AS_MODULE) && \
-	 IS_MODULE(CONFIG_ARM_FFA_TRANSPORT))
+#if defined(MODS_HAS_ARM_FFA)
 		MODS_IOCTL(MODS_ESC_FFA_CMD, esc_mods_arm_ffa_cmd, MODS_FFA_PARAMS);
 #else
 		cl_debug(DEBUG_IOCTL, "ioctl(MODS_ESC_FFA_CMD is not supported)\n");

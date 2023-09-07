@@ -787,8 +787,8 @@ static int mods_allocate_irqs(struct mods_client *client,
 		 flags);
 
 	/* Determine if the device supports requested interrupt type */
-	if (irq_type == MODS_IRQ_TYPE_MSI) {
 #ifdef CONFIG_PCI_MSI
+	if (irq_type == MODS_IRQ_TYPE_MSI) {
 		if (pci_find_capability(dev, PCI_CAP_ID_MSI) == 0) {
 			cl_error("dev %04x:%02x:%02x.%x does not support MSI\n",
 				 pci_domain_nr(dev->bus),
@@ -798,13 +798,11 @@ static int mods_allocate_irqs(struct mods_client *client,
 			LOG_EXT();
 			return -ENOENT;
 		}
-#else
-		cl_error("the kernel does not support MSI\n");
-		LOG_EXT();
-		return -EINVAL;
-#endif
 	} else if (irq_type == MODS_IRQ_TYPE_MSIX) {
-#ifdef CONFIG_PCI_MSI
+#ifdef MODS_HAS_MSIX_RANGE
+		int cnt;
+#endif
+
 		if (pci_find_capability(dev, PCI_CAP_ID_MSIX) == 0) {
 			cl_error(
 				"dev %04x:%02x:%02x.%x does not support MSI-X\n",
@@ -815,12 +813,38 @@ static int mods_allocate_irqs(struct mods_client *client,
 			LOG_EXT();
 			return -ENOENT;
 		}
-#else
-		cl_error("the kernel does not support MSI-X\n");
-		LOG_EXT();
-		return -EINVAL;
+
+#ifdef MODS_HAS_MSIX_RANGE
+		cnt = pci_msix_vec_count(dev);
+		if (cnt < 0) {
+			cl_error("MSI-X is not available on dev %04x:%02x:%02x.%x\n",
+				 pci_domain_nr(dev->bus),
+				 dev->bus->number,
+				 PCI_SLOT(dev->devfn),
+				 PCI_FUNC(dev->devfn));
+			LOG_EXT();
+			return cnt;
+		}
+		if (nvecs > (u32)cnt) {
+			cl_error("cannot allocate %u MSI-X vectors on dev %04x:%02x:%02x.%x, only %d supported\n",
+				 nvecs,
+				 pci_domain_nr(dev->bus),
+				 dev->bus->number,
+				 PCI_SLOT(dev->devfn),
+				 PCI_FUNC(dev->devfn),
+				 cnt);
+			LOG_EXT();
+			return -EINVAL;
+		}
 #endif
 	}
+#else
+	if (irq_type == MODS_IRQ_TYPE_MSI || irq_type == MODS_IRQ_TYPE_MSIX) {
+		cl_error("the kernel does not support MSI\n");
+		LOG_EXT();
+		return -EINVAL;
+	}
+#endif
 
 	/* Enable device on the PCI bus */
 	err = mods_enable_device(client, dev, &dpriv);
@@ -864,14 +888,14 @@ static int mods_allocate_irqs(struct mods_client *client,
 		dpriv->nvecs = 1;
 	} else if (irq_type == MODS_IRQ_TYPE_MSIX) {
 		struct msix_entry *entries;
-		int i = 0, cnt = 1;
+		int i;
+		int cnt;
 
 		entries = kcalloc(nvecs, sizeof(struct msix_entry),
 				GFP_KERNEL | __GFP_NORETRY);
 
 		if (!entries) {
-			cl_error("could not allocate %d MSI-X entries\n",
-				 nvecs);
+			cl_error("could not allocate memory\n");
 			LOG_EXT();
 			return -ENOMEM;
 		}
@@ -884,17 +908,19 @@ static int mods_allocate_irqs(struct mods_client *client,
 		cnt = pci_enable_msix_range(dev, entries, nvecs, nvecs);
 
 		if (cnt < 0) {
-			/* returns number of interrupts allocated
-			 * < 0 indicates a failure.
-			 */
-			cl_error(
-				"could not allocate the requested number of MSI-X vectors=%d return=%d!\n",
-				nvecs, cnt);
+			cl_error("failed to allocate %u MSI-X vectors on dev %04x:%02x:%02x.%x\n",
+				 nvecs,
+				 pci_domain_nr(dev->bus),
+				 dev->bus->number,
+				 PCI_SLOT(dev->devfn),
+				 PCI_FUNC(dev->devfn));
 			kfree(entries);
 			atomic_dec(&client->num_allocs);
 			LOG_EXT();
 			return cnt;
 		}
+
+		nvecs = (u32)cnt;
 #else
 		cnt = pci_enable_msix(dev, entries, nvecs);
 
@@ -904,9 +930,12 @@ static int mods_allocate_irqs(struct mods_client *client,
 			 *  exceeding the number of irqs or MSI-X
 			 *  vectors available
 			 */
-			cl_error(
-				"could not allocate the requested number of MSI-X vectors=%d return=%d!\n",
-				nvecs, cnt);
+			cl_error("failed to allocate %u MSI-X vectors on dev %04x:%02x:%02x.%x\n",
+				 nvecs,
+				 pci_domain_nr(dev->bus),
+				 dev->bus->number,
+				 PCI_SLOT(dev->devfn),
+				 PCI_FUNC(dev->devfn));
 			kfree(entries);
 			atomic_dec(&client->num_allocs);
 			LOG_EXT();

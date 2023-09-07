@@ -8,7 +8,7 @@
 
 /* Driver version */
 #define MODS_DRIVER_VERSION_MAJOR 4
-#define MODS_DRIVER_VERSION_MINOR 20
+#define MODS_DRIVER_VERSION_MINOR 21
 #define MODS_DRIVER_VERSION ((MODS_DRIVER_VERSION_MAJOR << 8) | \
 			     ((MODS_DRIVER_VERSION_MINOR / 10) << 4) | \
 			     (MODS_DRIVER_VERSION_MINOR % 10))
@@ -1935,6 +1935,18 @@ struct MODS_BPMP_UPHY_LANE_EOM_SCAN_PARAMS {
 	__u32 data;
 };
 
+#define MODS_IDLE_METHOD_ARM_WFI 0
+#define MODS_IDLE_METHOD_ARM_WFE 1
+
+/* Used by MODS_ESC_IDLE
+ *
+ * Idles the calling CPU.
+ */
+struct MODS_IDLE {
+	__u32 idle_method;
+	__u32 num_loops;
+};
+
 #pragma pack(pop)
 
 #define MODS_IOC_MAGIC 'x'
@@ -2151,5 +2163,6 @@ struct MODS_BPMP_UPHY_LANE_EOM_SCAN_PARAMS {
 #define MODS_ESC_FFA_CMD MODSIO(WR, 145, MODS_FFA_PARAMS)
 #define MODS_ESC_BPMP_UPHY_LANE_EOM_SCAN MODSIO(WR, 146, \
 						MODS_BPMP_UPHY_LANE_EOM_SCAN_PARAMS)
+#define MODS_ESC_IDLE MODSIO(W, 147, MODS_IDLE)
 
 #endif /* _UAPI_MODS_H_  */

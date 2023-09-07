@@ -74,6 +74,18 @@ static int mods_mi_set(void *data, u64 val)
 
 DEFINE_SIMPLE_ATTRIBUTE(mods_mi_fops, mods_mi_get, mods_mi_set, "%llu\n");
 
+static int mods_ffa_get(void *data, u64 *val)
+{
+#if defined(MODS_HAS_ARM_FFA)
+	*val = 1ULL;
+#else
+	*val = 0ULL;
+#endif
+	return 0;
+}
+
+DEFINE_SIMPLE_ATTRIBUTE(mods_ffa_fops, mods_ffa_get, NULL, "%llu\n");
+
 void mods_remove_debugfs(void)
 {
 	debugfs_remove_recursive(mods_debugfs_dir);
@@ -101,6 +113,13 @@ int mods_create_debugfs(struct miscdevice *modsdev)
 
 	retval = debugfs_create_file("multi_instance", 0644,
 		mods_debugfs_dir, NULL, &mods_mi_fops);
+	if (IS_ERR(retval)) {
+		err = -EIO;
+		goto remove_out;
+	}
+
+	retval = debugfs_create_file("ffa", 0444,
+		mods_debugfs_dir, NULL, &mods_ffa_fops);
 	if (IS_ERR(retval)) {
 		err = -EIO;
 		goto remove_out;
