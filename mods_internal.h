@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/* Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved. */
+/* SPDX-FileCopyrightText: Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved. */
 
 #ifndef _MODS_INTERNAL_H_
 #define _MODS_INTERNAL_H_
@@ -355,8 +355,10 @@ struct mods_priv {
 
 #if KERNEL_VERSION(5, 11, 0) <= MODS_KERNEL_VERSION
 #	define MODS_KMAP kmap_local_page
+#	define MODS_KUNMAP kunmap_local
 #else
 #	define MODS_KMAP kmap
+#	define MODS_KUNMAP kunmap
 #endif
 
 /* ************************************************************************* */

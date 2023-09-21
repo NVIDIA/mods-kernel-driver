@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved. */
+/* SPDX-FileCopyrightText: Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved. */
 
 #include "mods_internal.h"
 
@@ -95,7 +95,17 @@ static int acpi_dev_check_one(struct acpi_device *adev, void *data)
 	return ((err == -EALREADY) ? OK : err);
 }
 
-#if KERNEL_VERSION(6, 0, 0) > MODS_KERNEL_VERSION
+#if (KERNEL_VERSION(5, 14, 0) < MODS_KERNEL_VERSION) && \
+	(KERNEL_VERSION(5, 15, 0) > MODS_KERNEL_VERSION) && \
+	defined(CONFIG_SUSE_KERNEL) && \
+	defined(CONFIG_SUSE_VERSION) && \
+	defined(CONFIG_SUSE_PATCHLEVEL) && \
+	(CONFIG_SUSE_VERSION == 15) && \
+	(CONFIG_SUSE_PATCHLEVEL >= 5)
+#       define MODS_SUSE_ACPI_HACK 1
+#endif
+
+#if (KERNEL_VERSION(6, 0, 0) > MODS_KERNEL_VERSION) && !defined(MODS_SUSE_ACPI_HACK)
 static int acpi_dev_each_child_node(struct acpi_device *adev,
 				    int (*fptr)(struct acpi_device *, void *),
 				    void *data)

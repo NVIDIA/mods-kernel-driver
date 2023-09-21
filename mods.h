@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only WITH Linux-syscall-note */
-/* Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved. */
+/* SPDX-FileCopyrightText: Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved. */
 
 #ifndef _UAPI_MODS_H_
 #define _UAPI_MODS_H_
@@ -8,7 +8,7 @@
 
 /* Driver version */
 #define MODS_DRIVER_VERSION_MAJOR 4
-#define MODS_DRIVER_VERSION_MINOR 21
+#define MODS_DRIVER_VERSION_MINOR 22
 #define MODS_DRIVER_VERSION ((MODS_DRIVER_VERSION_MAJOR << 8) | \
 			     ((MODS_DRIVER_VERSION_MINOR / 10) << 4) | \
 			     (MODS_DRIVER_VERSION_MINOR % 10))

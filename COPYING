@@ -3,18 +3,20 @@ GNU General Public License, version 2 (this license) applies to all files
 in the NVIDIA MODS kernel driver package.
 
 The NVIDIA MODS kernel driver package contains the following files:
+  COPYING
   Makefile
+  mods_acpi.c
+  mods_arm_ffa.c
+  mods_bpmpipc.c
+  mods_config.h
+  mods_debugfs.c
+  mods.h
+  mods_internal.h
+  mods_irq.c
+  mods_krnl.c
   mods_mem.c
   mods_pci.c
-  mods_irq.c
-  mods_acpi.c
-  mods_krnl.c
-  mods_debugfs.c
   mods_ppc64.c
-  mods_internal.h
-  mods_config.h
-  mods.h
-  COPYING
   README
 
 -----------------------------------------------------------------------------

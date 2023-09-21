@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved. */
+/* SPDX-FileCopyrightText: Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved. */
 
 #include "mods_internal.h"
 
@@ -1014,7 +1014,7 @@ static int mods_krnl_vma_access(struct vm_area_struct *vma,
 				else
 					memcpy(buf, bptr, len);
 
-				kunmap(ptr);
+				MODS_KUNMAP(ptr);
 
 				err = len;
 			} else

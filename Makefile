@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved.
 
 # If KERNELRELEASE is defined, we've been invoked from the
 # kernel build system and can use its language.

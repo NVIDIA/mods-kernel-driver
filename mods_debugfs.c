@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (c) 2014-2023, NVIDIA CORPORATION.  All rights reserved. */
+/* SPDX-FileCopyrightText: Copyright (c) 2014-2023, NVIDIA CORPORATION.  All rights reserved. */
 
 #include "mods_internal.h"
 
