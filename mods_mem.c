@@ -2461,7 +2461,7 @@ static void clear_contiguous_cache(struct mods_client *client,
 	static u32 d_line_shift;
 
 	if (!d_line_shift) {
-#if KERNEL_VERSION(6, 0, 0) <= MODS_KERNEL_VERSION
+#ifdef CTR_EL0_DminLine_SHIFT
 		const u64 ctr_el0 = read_sanitised_ftr_reg(SYS_CTR_EL0);
 
 		d_line_shift =

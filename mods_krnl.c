@@ -519,8 +519,7 @@ static int __init mods_init_module(void)
 		return -EBUSY;
 #endif
 
-#if defined(MODS_HAS_TEGRA) && defined(CONFIG_COMMON_CLK) && \
-	defined(CONFIG_OF_RESOLVE) && defined(CONFIG_OF_DYNAMIC)
+#if defined(MODS_HAS_TEGRA) && defined(CONFIG_COMMON_CLK)
 	mods_init_clock_api();
 #endif
 
@@ -590,8 +589,7 @@ static void __exit mods_exit_module(void)
 
 	misc_deregister(&mods_dev);
 
-#if defined(MODS_HAS_TEGRA) && defined(CONFIG_COMMON_CLK) && \
-	defined(CONFIG_OF_RESOLVE) && defined(CONFIG_OF_DYNAMIC)
+#if defined(MODS_HAS_TEGRA) && defined(CONFIG_COMMON_CLK)
 	mods_shutdown_clock_api();
 #endif
 
@@ -2520,8 +2518,7 @@ static long mods_krnl_ioctl(struct file  *fp,
 			   esc_mods_get_kernel_version, MODS_GET_VERSION);
 		break;
 
-#if defined(MODS_HAS_TEGRA) && defined(CONFIG_COMMON_CLK) && \
-	defined(CONFIG_OF_RESOLVE) && defined(CONFIG_OF_DYNAMIC)
+#if defined(MODS_HAS_TEGRA) && defined(CONFIG_COMMON_CLK)
 	case MODS_ESC_GET_CLOCK_HANDLE:
 		MODS_IOCTL(MODS_ESC_GET_CLOCK_HANDLE,
 			   esc_mods_get_clock_handle, MODS_GET_CLOCK_HANDLE);

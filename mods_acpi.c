@@ -76,17 +76,19 @@ struct acpi_dev_check_context {
 	void               *out_data;
 };
 
-static int acpi_dev_check_one(struct acpi_device *adev, void *data)
+static int acpi_dev_check_one(struct device *dev, void *data)
 {
-	int                 err       = OK;
-	unsigned long long  device_id = 0;
-	acpi_status         status;
-	struct acpi_dev_check_context *adwc = data;
+	struct acpi_dev_check_context *adwc      = data;
+	struct acpi_device            *adev      = to_acpi_device(dev);
+	int                            err       = OK;
+	unsigned long long             device_id = 0;
+	acpi_status                    status;
 
-	status = acpi_evaluate_integer(adev->handle,
-			"_ADR",
-			NULL,
-			&device_id);
+	if (!adev)
+		/* No ACPI device corresponding to this device */
+		return OK;
+
+	status = acpi_evaluate_integer(adev->handle, "_ADR", NULL, &device_id);
 	if (ACPI_FAILURE(status))
 		/* Couldnt query device_id for this device */
 		return OK;
@@ -94,36 +96,6 @@ static int acpi_dev_check_one(struct acpi_device *adev, void *data)
 	err = adwc->fptr(adwc->client, device_id, adev->handle, adwc->out_data);
 	return ((err == -EALREADY) ? OK : err);
 }
-
-#if (KERNEL_VERSION(5, 14, 0) < MODS_KERNEL_VERSION) && \
-	(KERNEL_VERSION(5, 15, 0) > MODS_KERNEL_VERSION) && \
-	defined(CONFIG_SUSE_KERNEL) && \
-	defined(CONFIG_SUSE_VERSION) && \
-	defined(CONFIG_SUSE_PATCHLEVEL) && \
-	(CONFIG_SUSE_VERSION == 15) && \
-	(CONFIG_SUSE_PATCHLEVEL >= 5)
-#       define MODS_SUSE_ACPI_HACK 1
-#endif
-
-#if (KERNEL_VERSION(6, 0, 0) > MODS_KERNEL_VERSION) && !defined(MODS_SUSE_ACPI_HACK)
-static int acpi_dev_each_child_node(struct acpi_device *adev,
-				    int (*fptr)(struct acpi_device *, void *),
-				    void *data)
-{
-	struct list_head   *node    = NULL;
-	struct list_head   *next    = NULL;
-
-	list_for_each_safe(node, next, &adev->children) {
-		struct acpi_device *dev =
-			list_entry(node, struct acpi_device, node);
-
-		fptr(dev, data);
-	}
-	return OK;
-}
-#else
-#define acpi_dev_each_child_node acpi_dev_for_each_child
-#endif
 
 static int acpi_get_dev_children(struct mods_client *client,
 				 dev_children_fptr   fptr,
@@ -149,7 +121,7 @@ static int acpi_get_dev_children(struct mods_client *client,
 	if (unlikely(err))
 		cl_error("ACPI: device for fetching device children not found\n");
 	else
-		err = acpi_dev_each_child_node(device, acpi_dev_check_one, &adcc);
+		err = device_for_each_child(&device->dev, &adcc, acpi_dev_check_one);
 
 	LOG_EXT();
 	return err;

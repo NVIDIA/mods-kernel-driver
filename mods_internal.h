@@ -409,8 +409,7 @@ int mods_find_pci_dev(struct mods_client    *client,
 #endif
 
 /* clock */
-#if defined(MODS_HAS_TEGRA) && defined(CONFIG_COMMON_CLK) && \
-		defined(CONFIG_OF_RESOLVE) && defined(CONFIG_OF_DYNAMIC)
+#if defined(MODS_HAS_TEGRA) && defined(CONFIG_COMMON_CLK)
 void mods_init_clock_api(void);
 void mods_shutdown_clock_api(void);
 #endif

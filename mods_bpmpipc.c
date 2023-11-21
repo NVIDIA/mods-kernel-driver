@@ -10,10 +10,6 @@
 #include <soc/tegra/ivc.h>
 #include <soc/tegra/bpmp.h>
 
-#if (KERNEL_VERSION(6, 2, 0) <= MODS_KERNEL_VERSION)
-#include <linux/iosys-map.h>
-#endif
-
 #define IVC_CHANNEL_SIZE  256
 #define MRQ_MSG_SIZE      128
 #define BPMP_MAIL_DO_ACK  (1U << 0U)
@@ -68,7 +64,7 @@ static int bpmp_ipc_send(struct mods_client *client,
 			 const void *data,
 			 size_t sz)
 {
-#if (KERNEL_VERSION(6, 2, 0) <= MODS_KERNEL_VERSION)
+#if (KERNEL_VERSION(6, 2, 0) <= MODS_KERNEL_VERSION) || defined(__IOSYS_MAP_H__)
 	int err;
 	struct iosys_map ob;
 
@@ -101,7 +97,7 @@ static int bpmp_ipc_recv(struct mods_client *client,
 			 u32 timeout_ms)
 {
 	int err;
-#if (KERNEL_VERSION(6, 2, 0) <= MODS_KERNEL_VERSION)
+#if (KERNEL_VERSION(6, 2, 0) <= MODS_KERNEL_VERSION) || defined(__IOSYS_MAP_H__)
 	struct iosys_map ib;
 #else
 	const void *frame;
@@ -110,7 +106,7 @@ static int bpmp_ipc_recv(struct mods_client *client,
 
 	end = ktime_add_ms(ktime_get(), timeout_ms);
 
-#if (KERNEL_VERSION(6, 2, 0) <= MODS_KERNEL_VERSION)
+#if (KERNEL_VERSION(6, 2, 0) <= MODS_KERNEL_VERSION) || defined(__IOSYS_MAP_H__)
 	do {
 		err = tegra_ivc_read_get_next_frame(ivc, &ib);
 		if (!err)
@@ -270,7 +266,7 @@ static int bpmp_ipc_channel_init(struct mods_client *client,
 	int err;
 	ktime_t end;
 
-#if (KERNEL_VERSION(6, 2, 0) <= MODS_KERNEL_VERSION)
+#if (KERNEL_VERSION(6, 2, 0) <= MODS_KERNEL_VERSION) || defined(__IOSYS_MAP_H__)
 	struct iosys_map rx, tx;
 
 	iosys_map_set_vaddr_iomem(&rx, bpmp_ipc_ch->resp_base);
