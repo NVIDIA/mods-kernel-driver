@@ -131,7 +131,7 @@ struct MODS_DMA_MAP {
 					* was mapped to is not a PCI device.
 					*/
 	struct device     *dev;        /* device these mappings are for */
-	struct scatterlist sg[1];      /* each entry corresponds to phys chunk
+	struct scatterlist sg[];       /* each entry corresponds to phys chunk
 					* in sg array in MODS_MEM_INFO at the
 					* same index
 					*/
@@ -146,12 +146,13 @@ struct MODS_MEM_INFO {
 	 */
 	struct list_head dma_map_list;
 
-	u32 num_pages;      /* total number of allocated pages */
-	u32 num_chunks;     /* number of allocated contig chunks */
-	int numa_node;      /* numa node for the allocation */
-	u8  cache_type : 2; /* MODS_ALLOC_* */
-	u8  dma32      : 1; /* true/false */
-	u8  force_numa : 1; /* true/false */
+	u32 num_pages;       /* total number of allocated pages */
+	u32 num_chunks;      /* number of allocated contig chunks */
+	int numa_node;       /* numa node for the allocation */
+	u8  cache_type : 2;  /* MODS_ALLOC_* */
+	u8  dma32      : 1;  /* true/false */
+	u8  force_numa : 1;  /* true/false */
+	u8  reservation_tag; /* zero if not reserved */
 
 	struct pci_dev     *dev;         /* (optional) pci_dev this allocation
 					  * is for.
@@ -159,7 +160,7 @@ struct MODS_MEM_INFO {
 	unsigned long      *wc_bitmap;   /* marks which chunks use WC/UC */
 	struct scatterlist *sg;          /* current list of chunks */
 	struct scatterlist  contig_sg;   /* contiguous merged chunk */
-	struct scatterlist  alloc_sg[1]; /* allocated memory chunks, each chunk
+	struct scatterlist  alloc_sg[];  /* allocated memory chunks, each chunk
 					  * consists of 2^n contiguous pages
 					  */
 };
@@ -380,6 +381,7 @@ const char *mods_get_prot_str(u8 mem_type);
 int mods_unregister_all_alloc(struct mods_client *client);
 struct MODS_MEM_INFO *mods_find_alloc(struct mods_client *client,
 				      u64                 phys_addr);
+void mods_free_mem_reservations(void);
 
 #if defined(CONFIG_PPC64)
 /* ppc64 */
@@ -453,6 +455,12 @@ int esc_mods_iommu_dma_map_memory(struct mods_client               *client,
 				  struct MODS_IOMMU_DMA_MAP_MEMORY *p);
 int esc_mods_iommu_dma_unmap_memory(struct mods_client               *client,
 				    struct MODS_IOMMU_DMA_MAP_MEMORY *p);
+int esc_mods_reserve_allocation(struct mods_client             *client,
+				struct MODS_RESERVE_ALLOCATION *p);
+int esc_mods_get_reserved_allocation(struct mods_client             *client,
+				     struct MODS_RESERVE_ALLOCATION *p);
+int esc_mods_release_reserved_allocation(struct mods_client             *client,
+					 struct MODS_RESERVE_ALLOCATION *p);
 
 #ifdef CONFIG_ARM
 int esc_mods_memory_barrier(struct mods_client *client);
@@ -670,7 +678,7 @@ int esc_mods_send_trustzone_msg(struct mods_client         *client,
 	struct MODS_TZ_PARAMS      *p);
 #endif
 
-#ifdef CONFIG_OPTEE
+#if IS_ENABLED(CONFIG_OPTEE)
 /* OP-TEE TA call */
 int esc_mods_invoke_optee_ta(struct mods_client *client,
 	struct MODS_OPTEE_PARAMS *p);
