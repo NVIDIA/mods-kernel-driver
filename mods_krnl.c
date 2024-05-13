@@ -666,23 +666,15 @@ static inline int mods_resume_console(struct mods_client *client) { return 0; }
 /*********************
  * MAPPING FUNCTIONS *
  *********************/
-static int register_mapping(struct mods_client   *client,
-			    struct MODS_MEM_INFO *p_mem_info,
-			    phys_addr_t           phys_addr,
-			    unsigned long         virtual_address,
-			    unsigned long         mapping_offs,
-			    unsigned long         mapping_length)
+static int register_mapping(struct mods_client    *client,
+			    struct MODS_MEM_INFO  *p_mem_info,
+			    phys_addr_t            phys_addr,
+			    struct SYS_MAP_MEMORY *p_map_mem,
+			    unsigned long          virtual_address,
+			    unsigned long          mapping_offs,
+			    unsigned long          mapping_length)
 {
-	struct SYS_MAP_MEMORY *p_map_mem;
-
 	LOG_ENT();
-
-	p_map_mem = kzalloc(sizeof(*p_map_mem), GFP_KERNEL | __GFP_NORETRY);
-	if (unlikely(!p_map_mem)) {
-		LOG_EXT();
-		return -ENOMEM;
-	}
-	atomic_inc(&client->num_allocs);
 
 	p_map_mem->phys_addr      = phys_addr;
 	p_map_mem->virtual_addr   = virtual_address;
@@ -702,56 +694,6 @@ static int register_mapping(struct mods_client   *client,
 
 	LOG_EXT();
 	return OK;
-}
-
-static void unregister_mapping(struct mods_client    *client,
-			       struct SYS_MAP_MEMORY *p_map_mem)
-{
-	list_del(&p_map_mem->list);
-
-	kfree(p_map_mem);
-	atomic_dec(&client->num_allocs);
-}
-
-static struct SYS_MAP_MEMORY *find_mapping(struct mods_client *client,
-					   unsigned long       virtual_address)
-{
-	struct SYS_MAP_MEMORY *p_map_mem = NULL;
-	struct list_head      *head      = &client->mem_map_list;
-	struct list_head      *iter;
-
-	LOG_ENT();
-
-	list_for_each(iter, head) {
-		p_map_mem = list_entry(iter, struct SYS_MAP_MEMORY, list);
-
-		if (p_map_mem->virtual_addr == virtual_address)
-			break;
-
-		p_map_mem = NULL;
-	}
-
-	LOG_EXT();
-
-	return p_map_mem;
-}
-
-static void unregister_all_mappings(struct mods_client *client)
-{
-	struct SYS_MAP_MEMORY *p_map_mem;
-	struct list_head      *head = &client->mem_map_list;
-	struct list_head      *iter;
-	struct list_head      *tmp;
-
-	LOG_ENT();
-
-	list_for_each_safe(iter, tmp, head) {
-		p_map_mem = list_entry(iter, struct SYS_MAP_MEMORY, list);
-
-		unregister_mapping(client, p_map_mem);
-	}
-
-	LOG_EXT();
 }
 
 static pgprot_t get_prot(struct mods_client *client,
@@ -880,41 +822,39 @@ static void mods_pci_resume(struct pci_dev *dev)
  ********************/
 static void mods_krnl_vma_open(struct vm_area_struct *vma)
 {
-	struct mods_vm_private_data *priv;
+	struct SYS_MAP_MEMORY *p_map_mem;
 
 	LOG_ENT();
+
 	mods_debug_printk(DEBUG_MEM_DETAILED,
 			  "open vma, virt 0x%lx, size 0x%lx, phys 0x%llx\n",
 			  vma->vm_start,
 			  vma->vm_end - vma->vm_start,
 			  (unsigned long long)vma->vm_pgoff << PAGE_SHIFT);
 
-	priv = vma->vm_private_data;
-	if (priv)
-		atomic_inc(&priv->usage_count);
+	p_map_mem = vma->vm_private_data;
+	if (p_map_mem)
+		atomic_inc(&p_map_mem->usage_count);
 
 	LOG_EXT();
 }
 
 static void mods_krnl_vma_close(struct vm_area_struct *vma)
 {
-	struct mods_vm_private_data *priv;
+	struct SYS_MAP_MEMORY *p_map_mem;
 
 	LOG_ENT();
 
-	priv = vma->vm_private_data;
-	if (priv && atomic_dec_and_test(&priv->usage_count)) {
-		struct mods_client    *client = priv->client;
-		struct SYS_MAP_MEMORY *p_map_mem;
+	p_map_mem = vma->vm_private_data;
 
-		mutex_lock(&client->mtx);
+	if (p_map_mem && atomic_dec_and_test(&p_map_mem->usage_count)) {
+		struct mods_client *client = p_map_mem->client;
 
-		/* we need to unregister the mapping */
-		p_map_mem = find_mapping(client, vma->vm_start);
-		if (p_map_mem)
-			unregister_mapping(client, p_map_mem);
-
-		mutex_unlock(&client->mtx);
+		if (p_map_mem->mapping_length) {
+			mutex_lock(&client->mtx);
+			list_del(&p_map_mem->list);
+			mutex_unlock(&client->mtx);
+		}
 
 		mods_debug_printk(DEBUG_MEM_DETAILED,
 				  "closed vma, virt 0x%lx\n",
@@ -922,7 +862,7 @@ static void mods_krnl_vma_close(struct vm_area_struct *vma)
 
 		vma->vm_private_data = NULL;
 
-		kfree(priv);
+		kfree(p_map_mem);
 		atomic_dec(&client->num_allocs);
 	}
 
@@ -936,20 +876,19 @@ static int mods_krnl_vma_access(struct vm_area_struct *vma,
 				int                    len,
 				int                    write)
 {
-	struct mods_vm_private_data *priv = vma->vm_private_data;
-	struct mods_client          *client;
-	struct SYS_MAP_MEMORY       *p_map_mem;
-	unsigned long                map_offs;
-	int                          err  = OK;
+	struct SYS_MAP_MEMORY *p_map_mem = vma->vm_private_data;
+	struct mods_client    *client;
+	unsigned long          map_offs;
+	int                    err  = OK;
 
 	LOG_ENT();
 
-	if (!priv) {
+	if (!p_map_mem) {
 		LOG_EXT();
 		return -EINVAL;
 	}
 
-	client = priv->client;
+	client = p_map_mem->client;
 
 	cl_debug(DEBUG_MEM_DETAILED,
 		 "access vma [virt 0x%lx, size 0x%lx, phys 0x%llx] at virt 0x%lx, len 0x%x\n",
@@ -963,8 +902,6 @@ static int mods_krnl_vma_access(struct vm_area_struct *vma,
 		LOG_EXT();
 		return -EINTR;
 	}
-
-	p_map_mem = find_mapping(client, vma->vm_start);
 
 	if (unlikely(!p_map_mem || addr < p_map_mem->virtual_addr ||
 		     addr + len > p_map_mem->virtual_addr +
@@ -1099,7 +1036,10 @@ static int mods_krnl_close(struct inode *ip, struct file *fp)
 
 	mods_resume_console(client);
 
-	unregister_all_mappings(client);
+	/* All memory mappings should be gone before close */
+	if (unlikely(!list_empty(&client->mem_map_list)))
+		cl_error("not all memory mappings have been freed\n");
+
 	err = mods_unregister_all_alloc(client);
 	if (err)
 		cl_error("failed to free all memory\n");
@@ -1177,13 +1117,13 @@ static POLL_TYPE mods_krnl_poll(struct file *fp, poll_table *wait)
 	return mask;
 }
 
-static int mods_krnl_map_inner(struct mods_client    *client,
-			       struct vm_area_struct *vma);
+static int map_internal(struct mods_client    *client,
+			struct vm_area_struct *vma);
 
 static int mods_krnl_mmap(struct file *fp, struct vm_area_struct *vma)
 {
-	struct mods_vm_private_data *vma_private_data;
-	struct mods_client          *client = fp->private_data;
+	struct SYS_MAP_MEMORY *p_map_mem;
+	struct mods_client    *client = fp->private_data;
 	int err;
 
 	LOG_ENT();
@@ -1201,24 +1141,21 @@ static int mods_krnl_mmap(struct file *fp, struct vm_area_struct *vma)
 
 	vma->vm_ops = &mods_krnl_vm_ops;
 
-	vma_private_data = kzalloc(sizeof(*vma_private_data),
-				   GFP_KERNEL | __GFP_NORETRY);
-	if (unlikely(!vma_private_data)) {
+	p_map_mem = kzalloc(sizeof(*p_map_mem), GFP_KERNEL | __GFP_NORETRY);
+	if (unlikely(!p_map_mem)) {
 		LOG_EXT();
 		return -ENOMEM;
 	}
 	atomic_inc(&client->num_allocs);
 
-	/* set private data for vm_area_struct */
-	atomic_set(&vma_private_data->usage_count, 0);
-	vma_private_data->client = client;
-	vma->vm_private_data = vma_private_data;
+	p_map_mem->client    = client;
+	vma->vm_private_data = p_map_mem;
 
 	mods_krnl_vma_open(vma);
 
 	err = mutex_lock_interruptible(&client->mtx);
 	if (likely(!err)) {
-		err = mods_krnl_map_inner(client, vma);
+		err = map_internal(client, vma);
 		mutex_unlock(&client->mtx);
 	}
 
@@ -1318,6 +1255,7 @@ static int map_system_mem(struct mods_client    *client,
 	register_mapping(client,
 			 p_mem_info,
 			 reg_pa,
+			 vma->vm_private_data,
 			 vma->vm_start,
 			 skip_size,
 			 vma_size);
@@ -1357,6 +1295,7 @@ static int map_device_mem(struct mods_client    *client,
 	register_mapping(client,
 			 NULL,
 			 req_pa,
+			 vma->vm_private_data,
 			 vma->vm_start,
 			 0,
 			 vma_size);
@@ -1364,10 +1303,10 @@ static int map_device_mem(struct mods_client    *client,
 	return OK;
 }
 
-static int mods_krnl_map_inner(struct mods_client    *client,
-			       struct vm_area_struct *vma)
+static int map_internal(struct mods_client    *client,
+			struct vm_area_struct *vma)
 {
-	const phys_addr_t     req_pa = (phys_addr_t)vma->vm_pgoff << PAGE_SHIFT;
+	const phys_addr_t     req_pa     = (phys_addr_t)vma->vm_pgoff << PAGE_SHIFT;
 	struct MODS_MEM_INFO *p_mem_info = mods_find_alloc(client, req_pa);
 	const unsigned long   vma_size   = vma->vm_end - vma->vm_start;
 

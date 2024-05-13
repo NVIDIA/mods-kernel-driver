@@ -107,12 +107,6 @@ struct mods_client {
 	u8                       client_id;
 };
 
-/* VM private data */
-struct mods_vm_private_data {
-	struct mods_client *client;
-	atomic_t            usage_count;
-};
-
 /* Free WC or UC chunk, which can be reused */
 struct MODS_FREE_PHYS_CHUNK {
 	struct list_head list;
@@ -180,10 +174,12 @@ struct SYS_MAP_MEMORY {
 	/* used for offset lookup, NULL for device memory */
 	struct MODS_MEM_INFO *p_mem_info;
 
-	phys_addr_t   phys_addr;
-	unsigned long virtual_addr;
-	unsigned long mapping_offs;   /* mapped offset from the beginning of the allocation */
-	unsigned long mapping_length; /* how many bytes were mapped */
+	struct mods_client *client;
+	atomic_t            usage_count;
+	phys_addr_t         phys_addr;
+	unsigned long       virtual_addr;
+	unsigned long       mapping_offs;   /* mapped offset from the beginning of the allocation */
+	unsigned long       mapping_length; /* how many bytes were mapped */
 };
 
 struct mods_smmu_dev {
@@ -242,13 +238,12 @@ struct NVL_TRAINED {
 #define DEBUG_FUNC		0x40
 #define DEBUG_CLOCK		0x80
 #define DEBUG_DETAILED		0x100
-#define DEBUG_TEGRADC		0x200
 #define DEBUG_TEGRADMA		0x400
 #define DEBUG_ISR_DETAILED	(DEBUG_ISR | DEBUG_DETAILED)
 #define DEBUG_MEM_DETAILED	(DEBUG_MEM | DEBUG_DETAILED)
 #define DEBUG_ALL	        (DEBUG_IOCTL | DEBUG_PCI | DEBUG_ACPI | \
 	DEBUG_ISR | DEBUG_MEM | DEBUG_FUNC | DEBUG_CLOCK | DEBUG_DETAILED | \
-	DEBUG_TEGRADC | DEBUG_TEGRADMA)
+	DEBUG_TEGRADMA)
 
 #define LOG_ENT() mods_debug_printk(DEBUG_FUNC, "> %s\n", __func__)
 #define LOG_EXT() mods_debug_printk(DEBUG_FUNC, "< %s\n", __func__)
