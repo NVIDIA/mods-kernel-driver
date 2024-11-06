@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* SPDX-FileCopyrightText: Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved. */
+/* SPDX-FileCopyrightText: Copyright (c) 2008-2024, NVIDIA CORPORATION.  All rights reserved. */
 
 #include "mods_internal.h"
 
@@ -96,6 +96,16 @@ static const struct pci_device_id mods_pci_table[] = {
 
 static int mods_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
+	struct en_dev_entry *dpriv;
+
+	dpriv = kzalloc(sizeof(*dpriv), GFP_KERNEL | __GFP_NORETRY);
+	if (unlikely(!dpriv))
+		return -ENOMEM;
+
+	dpriv->dev = pci_dev_get(dev);
+	init_completion(&dpriv->client_completion);
+	pci_set_drvdata(dev, dpriv);
+
 	mods_debug_printk(DEBUG_PCI,
 			  "probed dev %04x:%02x:%02x.%x vendor %04x device %04x\n",
 			  pci_domain_nr(dev->bus),
@@ -107,6 +117,44 @@ static int mods_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	return 0;
 }
 
+static void mods_pci_remove(struct pci_dev *dev)
+{
+	struct en_dev_entry *dpriv = pci_get_drvdata(dev);
+
+	WARN_ON(!dpriv);
+
+	while (true) {
+		mutex_lock(mods_get_irq_mutex());
+
+		if (!is_valid_client_id(dpriv->client_id))
+			break;
+
+		mods_info_printk("removing dev %04x:%02x:%02x.%x, waiting for client %u\n",
+					pci_domain_nr(dev->bus),
+					dev->bus->number,
+					PCI_SLOT(dev->devfn),
+					PCI_FUNC(dev->devfn),
+					dpriv->client_id);
+
+		mutex_unlock(mods_get_irq_mutex());
+		wait_for_completion(&dpriv->client_completion);
+	}
+
+	pci_dev_put(dpriv->dev);
+	pci_set_drvdata(dev, NULL);
+	kfree(dpriv);
+
+	mutex_unlock(mods_get_irq_mutex());
+
+	mods_debug_printk(DEBUG_PCI,
+			  "removed dev %04x:%02x:%02x.%x vendor %04x device %04x\n",
+			  pci_domain_nr(dev->bus),
+			  dev->bus->number,
+			  PCI_SLOT(dev->devfn),
+			  PCI_FUNC(dev->devfn),
+			  dev->vendor, dev->device);
+}
+
 #if defined(CONFIG_PCI) && defined(MODS_HAS_SRIOV)
 static int mods_pci_sriov_configure(struct pci_dev *dev, int numvfs);
 #endif
@@ -115,6 +163,7 @@ static struct pci_driver mods_pci_driver = {
 	.name            = DEVICE_NAME,
 	.id_table        = mods_pci_table,
 	.probe           = mods_pci_probe,
+	.remove          = mods_pci_remove,
 	.err_handler     = &mods_pci_error_handlers,
 #ifdef MODS_HAS_SRIOV
 	.sriov_configure = mods_pci_sriov_configure,
@@ -229,14 +278,14 @@ static int esc_mods_set_num_vf(struct mods_client     *client,
 	}
 
 	dpriv = pci_get_drvdata(dev);
-	if (!dpriv) {
+	if (!dpriv || !is_valid_client_id(dpriv->client_id)) {
 		cl_error(
 			"failed to enable sriov, dev %04x:%02x:%02x.%x was not enabled\n",
 			pci_domain_nr(dev->bus),
 			dev->bus->number,
 			PCI_SLOT(dev->devfn),
 			PCI_FUNC(dev->devfn));
-		err = -EBUSY;
+		err = -EINVAL;
 		goto error;
 	}
 	if (dpriv->client_id != client->client_id) {
@@ -287,7 +336,7 @@ static int esc_mods_set_total_vf(struct mods_client     *client,
 	}
 
 	dpriv = pci_get_drvdata(dev);
-	if (!dpriv) {
+	if (!dpriv || !is_valid_client_id(dpriv->client_id)) {
 		cl_error(
 			"failed to enable sriov, dev %04x:%02x:%02x.%x was not enabled\n",
 			pci_domain_nr(dev->bus),
@@ -408,6 +457,7 @@ static struct mods_client *alloc_client(void)
 			init_waitqueue_head(&client->interrupt_event);
 			INIT_LIST_HEAD(&client->irq_list);
 			INIT_LIST_HEAD(&client->mem_alloc_list);
+			INIT_LIST_HEAD(&client->enabled_devices);
 			INIT_LIST_HEAD(&client->mem_map_list);
 			INIT_LIST_HEAD(&client->free_mem_list);
 #if defined(CONFIG_PPC64)
@@ -634,18 +684,32 @@ MODULE_PARM_DESC(ppc_tce_bypass,
 static void mods_disable_all_devices(struct mods_client *client)
 {
 #ifdef CONFIG_PCI
-	if (unlikely(mutex_lock_interruptible(mods_get_irq_mutex())))
-		return;
+	struct list_head *head = &client->enabled_devices;
+	struct en_dev_entry *entry;
+	struct en_dev_entry *tmp;
 
-	while (client->enabled_devices != NULL) {
-		struct en_dev_entry *old = client->enabled_devices;
+#ifdef MODS_HAS_SRIOV
+	mutex_lock(mods_get_irq_mutex());
+	list_for_each_entry_safe(entry, tmp, head, list) {
+		struct en_dev_entry *dpriv = pci_get_drvdata(entry->dev);
 
-		mods_disable_device(client, old->dev);
-		client->enabled_devices = old->next;
-		kfree(old);
-		atomic_dec(&client->num_allocs);
+		if (dpriv->num_vfs == 0) {
+			mods_disable_device(client, entry->dev);
+			list_del(&entry->list);
+		}
 	}
+	mutex_unlock(mods_get_irq_mutex());
 
+	list_for_each_entry(entry, head, list) {
+		pci_disable_sriov(entry->dev);
+	}
+#endif
+
+	mutex_lock(mods_get_irq_mutex());
+	list_for_each_entry_safe(entry, tmp, head, list) {
+		mods_disable_device(client, entry->dev);
+		list_del(&entry->list);
+	}
 	mutex_unlock(mods_get_irq_mutex());
 
 	if (client->cached_dev) {
@@ -653,7 +717,7 @@ static void mods_disable_all_devices(struct mods_client *client)
 		client->cached_dev = NULL;
 	}
 #else
-	WARN_ON(client->enabled_devices != NULL);
+	WARN_ON(!list_empty(&client->enabled_devices));
 #endif
 }
 
@@ -1181,9 +1245,14 @@ static int map_system_mem(struct mods_client    *client,
 	const u32           num_chunks  = get_num_chunks(p_mem_info);
 	u32                 map_chunks;
 	u32                 i           = 0;
-	const pgprot_t      prot        = get_prot(client,
+	pgprot_t            prot        = get_prot(client,
 						   p_mem_info->cache_type,
 						   vma->vm_page_prot);
+
+#ifdef MODS_HAS_PGPROT_DECRYPT
+	if (p_mem_info->decrypted_mmap)
+		prot = pgprot_decrypted(prot);
+#endif
 
 	/* Find the beginning of the requested range */
 	for_each_sg(p_mem_info->sg, sg, num_chunks, i) {

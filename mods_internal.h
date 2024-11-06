@@ -1,9 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/* SPDX-FileCopyrightText: Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved. */
+/* SPDX-FileCopyrightText: Copyright (c) 2008-2024, NVIDIA CORPORATION.  All rights reserved. */
 
 #ifndef _MODS_INTERNAL_H_
 #define _MODS_INTERNAL_H_
 
+#include <linux/completion.h>
 #include <linux/fb.h>
 #include <linux/list.h>
 #include <linux/miscdevice.h>
@@ -44,9 +45,10 @@
 #define MSI_DEV_NOT_FOUND 0
 
 struct en_dev_entry {
+	struct list_head    list;
 	struct pci_dev	    *dev;
-	struct en_dev_entry *next;
 	struct msix_entry   *msix_entries;
+	struct completion    client_completion;
 	u32                  irq_flags;
 	u32                  nvecs;
 #ifdef MODS_HAS_SRIOV
@@ -86,10 +88,10 @@ struct mods_client {
 	struct list_head         ppc_tce_bypass_list;
 	struct list_head         nvlink_sysmem_trained_list;
 #endif
+	struct list_head         enabled_devices;
 	wait_queue_head_t        interrupt_event;
 	struct irq_q_info        irq_queue;
 	spinlock_t               irq_lock;
-	struct en_dev_entry     *enabled_devices;
 	struct workqueue_struct *work_queue;
 	struct mem_type          mem_type;
 #if defined(CONFIG_PCI)
@@ -140,23 +142,24 @@ struct MODS_MEM_INFO {
 	 */
 	struct list_head dma_map_list;
 
-	u32 num_pages;       /* total number of allocated pages */
-	u32 num_chunks;      /* number of allocated contig chunks */
-	int numa_node;       /* numa node for the allocation */
-	u8  cache_type : 2;  /* MODS_ALLOC_* */
-	u8  dma32      : 1;  /* true/false */
-	u8  force_numa : 1;  /* true/false */
-	u8  reservation_tag; /* zero if not reserved */
+	u32 num_pages;                  /* total number of allocated pages */
+	u32 num_chunks;                 /* number of allocated contig chunks */
+	int numa_node;                  /* numa node for the allocation */
+	u8  cache_type     : 2;         /* MODS_ALLOC_* */
+	u8  dma32          : 1;         /* true/false */
+	u8  force_numa     : 1;         /* true/false */
+	u8  no_free_opt    : 1;         /* true/false */
+	u8  dma_pages      : 1;         /* true/false */
+	u8  decrypted_mmap : 1;         /* true/false */
+	u8  reservation_tag;            /* zero if not reserved */
 
-	struct pci_dev     *dev;         /* (optional) pci_dev this allocation
-					  * is for.
-					  */
-	unsigned long      *wc_bitmap;   /* marks which chunks use WC/UC */
-	struct scatterlist *sg;          /* current list of chunks */
-	struct scatterlist  contig_sg;   /* contiguous merged chunk */
-	struct scatterlist  alloc_sg[];  /* allocated memory chunks, each chunk
-					  * consists of 2^n contiguous pages
-					  */
+	struct pci_dev     *dev;        /* (optional) pci_dev this allocation is for. */
+	unsigned long      *wc_bitmap;  /* marks which chunks use WC/UC */
+	struct scatterlist *sg;         /* current list of chunks */
+	struct scatterlist  contig_sg;  /* contiguous merged chunk */
+	struct scatterlist  alloc_sg[]; /* allocated memory chunks, each chunk
+					 * consists of 2^n contiguous pages
+					 */
 };
 
 static inline u32 get_num_chunks(const struct MODS_MEM_INFO *p_mem_info)
@@ -229,6 +232,8 @@ struct NVL_TRAINED {
 
 #define IRQ_VAL_POISON		0xfafbfcfdU
 
+#define INVALID_CLIENT_ID   0
+
 /* debug print masks */
 #define DEBUG_IOCTL		0x2
 #define DEBUG_PCI		0x4
@@ -278,6 +283,9 @@ struct NVL_TRAINED {
 
 #define cl_warn(fmt, args...)\
 	pr_notice("mods [%u] warning: " fmt, client->client_id, ##args)
+
+#define is_valid_client_id(client_id)\
+	((client_id) != INVALID_CLIENT_ID)
 
 struct irq_mask_info {
 	void __iomem *dev_irq_mask_reg;    /*IRQ mask register, read-only reg*/
