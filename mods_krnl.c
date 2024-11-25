@@ -1249,7 +1249,7 @@ static int map_system_mem(struct mods_client    *client,
 						   p_mem_info->cache_type,
 						   vma->vm_page_prot);
 
-#ifdef MODS_HAS_PGPROT_DECRYPT
+#ifdef MODS_HAS_PGPROT_DECRYPTED
 	if (p_mem_info->decrypted_mmap)
 		prot = pgprot_decrypted(prot);
 #endif
