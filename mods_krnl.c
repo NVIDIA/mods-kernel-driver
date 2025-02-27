@@ -2290,6 +2290,10 @@ static long mods_krnl_ioctl(struct file  *fp,
 			   esc_mods_free_pages, MODS_FREE_PAGES);
 		break;
 
+	case MODS_ESC_SET_CACHE_ATTR:
+		MODS_IOCTL_NORETVAL(MODS_ESC_SET_CACHE_ATTR, esc_mods_set_cache_attr, MODS_SET_CACHE_ATTR);
+		break;
+
 	case MODS_ESC_MERGE_PAGES:
 		MODS_IOCTL(MODS_ESC_MERGE_PAGES,
 			   esc_mods_merge_pages, MODS_MERGE_PAGES);
