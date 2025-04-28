@@ -7,6 +7,7 @@
 #include <linux/mutex.h>
 #include <linux/pagemap.h>
 #include <linux/sched.h>
+#include <linux/vmalloc.h>
 
 #if defined(MODS_HAS_SET_DMA_MASK)
 #include <linux/dma-mapping.h>
@@ -487,6 +488,17 @@ static struct MODS_DMA_MAP *find_dma_map(struct MODS_MEM_INFO  *p_mem_info,
 	}
 
 	return NULL;
+}
+
+static void free_mem_info(struct mods_client   *client,
+			  struct MODS_MEM_INFO *p_mem_info)
+{
+	if (unlikely(p_mem_info->large_aux))
+		vfree(p_mem_info);
+	else
+		kfree(p_mem_info);
+
+	atomic_dec(&client->num_allocs);
 }
 
 /* In order to map pages as UC or WC to the CPU, we need to change their
@@ -1022,15 +1034,15 @@ static int unregister_and_free_alloc(struct mods_client   *client,
 
 			pci_dev_put(p_mem_info->dev);
 
-			kfree(p_mem_info);
+			free_mem_info(client, p_mem_info);
 		} else {
 			/* Decrement client num_pages manually if not releasing chunks */
 			atomic_sub((int)p_mem_info->num_pages, &client->num_pages);
 			mutex_lock(&mem_reservation_mtx);
 			list_add(&p_mem_info->list, &avail_mem_reservations);
 			mutex_unlock(&mem_reservation_mtx);
+			atomic_dec(&client->num_allocs); /* Don't indicate a leak in this client */
 		}
-		atomic_dec(&client->num_allocs); /* always decrement to avoid leak */
 		err = OK;
 	} else {
 		cl_error("failed to unregister allocation %p\n", p_del_mem);
@@ -1287,11 +1299,13 @@ static inline u32 calc_mem_info_size(u32 num_chunks, u8 cache_type)
 
 static void init_mem_info(struct MODS_MEM_INFO *p_mem_info,
 			  u32                   num_chunks,
-			  u8                    cache_type)
+			  u8                    cache_type,
+			  u32                   alloc_size)
 {
 	p_mem_info->sg         = p_mem_info->alloc_sg;
 	p_mem_info->num_chunks = num_chunks;
 	p_mem_info->cache_type = cache_type;
+	p_mem_info->large_aux  = alloc_size >= MODS_LARGE_AUX_ALLOC_SIZE;
 
 	p_mem_info->wc_bitmap = (unsigned long *)
 		&p_mem_info->alloc_sg[num_chunks];
@@ -1310,7 +1324,12 @@ static struct MODS_MEM_INFO *alloc_mem_info(struct mods_client *client,
 
 	*alloc_size = calc_size;
 
-	p_mem_info = kzalloc(calc_size, GFP_KERNEL | __GFP_NORETRY);
+	if (likely(calc_size < MODS_LARGE_AUX_ALLOC_SIZE))
+		p_mem_info = kzalloc(calc_size, GFP_KERNEL | __GFP_NORETRY);
+	else {
+		p_mem_info = vmalloc(calc_size);
+		memset(p_mem_info, 0, calc_size);
+	}
 
 	if (likely(p_mem_info)) {
 		atomic_inc(&client->num_allocs);
@@ -1341,21 +1360,17 @@ static struct MODS_MEM_INFO *optimize_chunks(struct mods_client   *client,
 	}
 
 	if (num_chunks < p_mem_info->num_chunks)
-		p_new_mem_info = alloc_mem_info(client, num_chunks,
-						p_mem_info->cache_type,
-						&alloc_size);
+		p_new_mem_info = alloc_mem_info(client, num_chunks, p_mem_info->cache_type, &alloc_size);
 
 	if (p_new_mem_info) {
 		const size_t copy_size =
 			calc_mem_info_size_no_bitmap(num_chunks);
 
 		memcpy(p_new_mem_info, p_mem_info, copy_size);
-		init_mem_info(p_new_mem_info, num_chunks,
-			      p_mem_info->cache_type);
+		init_mem_info(p_new_mem_info, num_chunks, p_mem_info->cache_type, alloc_size);
 		copy_wc_bitmap(p_new_mem_info, 0, p_mem_info, num_chunks);
 
-		kfree(p_mem_info);
-		atomic_dec(&client->num_allocs);
+		free_mem_info(client, p_mem_info);
 
 		p_mem_info = p_new_mem_info;
 	}
@@ -1451,8 +1466,7 @@ int esc_mods_alloc_pages_2(struct mods_client        *client,
 
 	cache_type = (u8)(p->flags & MODS_ALLOC_CACHE_MASK);
 
-	p_mem_info = alloc_mem_info(client, num_chunks, cache_type,
-				    &alloc_size);
+	p_mem_info = alloc_mem_info(client, num_chunks, cache_type, &alloc_size);
 
 	if (unlikely(!p_mem_info)) {
 		cl_error("failed to allocate auxiliary 0x%x bytes for %u chunks to hold %u pages\n",
@@ -1461,7 +1475,7 @@ int esc_mods_alloc_pages_2(struct mods_client        *client,
 		goto failed;
 	}
 
-	init_mem_info(p_mem_info, num_chunks, cache_type);
+	init_mem_info(p_mem_info, num_chunks, cache_type, alloc_size);
 
 	p_mem_info->num_pages       = num_pages;
 	p_mem_info->dma32           = (p->flags & MODS_ALLOC_DMA32) ? true : false;
@@ -1561,8 +1575,7 @@ failed:
 		release_chunks(client, p_mem_info);
 		pci_dev_put(p_mem_info->dev);
 
-		kfree(p_mem_info);
-		atomic_dec(&client->num_allocs);
+		free_mem_info(client, p_mem_info);
 	}
 
 	LOG_EXT();
@@ -1949,8 +1962,7 @@ int esc_mods_merge_pages(struct mods_client      *client,
 		}
 	}
 
-	p_mem_info = alloc_mem_info(client, num_chunks, cache_type,
-				    &alloc_size);
+	p_mem_info = alloc_mem_info(client, num_chunks, cache_type, &alloc_size);
 
 	if (unlikely(!p_mem_info)) {
 		err = -ENOMEM;
@@ -1974,8 +1986,7 @@ int esc_mods_merge_pages(struct mods_client      *client,
 				calc_mem_info_size_no_bitmap(other_chunks);
 
 			memcpy(p_mem_info, p_other, copy_size);
-			init_mem_info(p_mem_info, num_chunks,
-				      p_other->cache_type);
+			init_mem_info(p_mem_info, num_chunks, p_other->cache_type, alloc_size);
 			p_mem_info->num_chunks = other_chunks;
 			copy_wc_bitmap(p_mem_info, 0, p_other, other_chunks);
 
@@ -1995,8 +2006,7 @@ int esc_mods_merge_pages(struct mods_client      *client,
 			p_mem_info->num_pages  += p_other->num_pages;
 		}
 
-		kfree(p_other);
-		atomic_dec(&client->num_allocs);
+		free_mem_info(client, p_other);
 	}
 
 	cl_debug(DEBUG_MEM, "merge alloc %p: %u chunks, %u pages\n",
@@ -2918,7 +2928,7 @@ void mods_free_mem_reservations(void)
 
 		release_chunks(client, p_mem_info);
 		pci_dev_put(p_mem_info->dev);
-		kfree(p_mem_info);
+		free_mem_info(client, p_mem_info);
 
 		++num_freed;
 	}
