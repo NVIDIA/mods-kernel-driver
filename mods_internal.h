@@ -45,8 +45,8 @@
 #define MSI_DEV_NOT_FOUND 0
 
 struct en_dev_entry {
-	struct list_head    list;
-	struct pci_dev	    *dev;
+	struct list_head     list;
+	struct pci_dev      *dev;
 	struct msix_entry   *msix_entries;
 	struct completion    client_completion;
 	u32                  irq_flags;
@@ -84,10 +84,6 @@ struct mods_client {
 	struct list_head         mem_alloc_list;
 	struct list_head         mem_map_list;
 	struct list_head         free_mem_list; /* unused UC/WC chunks */
-#if defined(CONFIG_PPC64)
-	struct list_head         ppc_tce_bypass_list;
-	struct list_head         nvlink_sysmem_trained_list;
-#endif
 	struct list_head         enabled_devices;
 	wait_queue_head_t        interrupt_event;
 	struct irq_q_info        irq_queue;
@@ -143,6 +139,7 @@ struct MODS_MEM_INFO {
 	struct list_head dma_map_list;
 
 	u64 reservation_tag;            /* zero if not reserved */
+	u64 shared_client_mask;         /* clients which can access this shared allocation */
 	u32 num_pages;                  /* total number of allocated pages */
 	u32 num_chunks;                 /* number of allocated contig chunks */
 	int numa_node;                  /* numa node for the allocation */
@@ -153,14 +150,14 @@ struct MODS_MEM_INFO {
 	u8  dma_pages      : 1;         /* true/false */
 	u8  decrypted_mmap : 1;         /* true/false */
 	u8  large_aux      : 1;         /* true/false */
+	u8  device_ro      : 1;         /* true/false */
+	u8  shared         : 1;         /* true/false */
 
 	struct pci_dev     *dev;        /* (optional) pci_dev this allocation is for. */
 	unsigned long      *wc_bitmap;  /* marks which chunks use WC/UC */
 	struct scatterlist *sg;         /* current list of chunks */
 	struct scatterlist  contig_sg;  /* contiguous merged chunk */
-	struct scatterlist  alloc_sg[]; /* allocated memory chunks, each chunk
-					 * consists of 2^n contiguous pages
-					 */
+	struct scatterlist  alloc_sg[]; /* allocated memory chunks, each consisting of 2^n contig pages */
 };
 
 /* Size for MODS_MEM_INFO struct allocation which requires vzalloc() */
@@ -205,30 +202,6 @@ int mods_check_debug_level(int mask);
 int mods_get_multi_instance(void);
 void mods_set_multi_instance(int mi);
 u32 mods_get_access_token(void);
-
-#if defined(CONFIG_PPC64)
-void mods_set_ppc_tce_bypass(int bypass);
-int mods_get_ppc_tce_bypass(void);
-
-/* PPC TCE bypass tracking */
-struct PPC_TCE_BYPASS {
-	struct pci_dev *dev;
-	u64 dma_mask;
-	struct list_head   list;
-};
-
-int has_npu_dev(struct pci_dev *dev, int index);
-
-int mods_is_nvlink_sysmem_trained(struct mods_client *client,
-				  struct pci_dev     *dev);
-
-/* NvLink Trained tracking */
-struct NVL_TRAINED {
-	struct pci_dev *dev;
-	u8 trained;
-	struct list_head list;
-};
-#endif
 
 #define IRQ_MAX			(256+PCI_IRQ_MAX)
 #define PCI_IRQ_MAX		15
@@ -326,8 +299,7 @@ struct mods_priv {
 #	define POLL_TYPE unsigned int
 #endif
 
-#if ((defined(CONFIG_ARM) || defined(CONFIG_ARM64)) && \
-	  !defined(CONFIG_CPA)) || defined(CONFIG_PPC64)
+#if ((defined(CONFIG_ARM) || defined(CONFIG_ARM64)) && !defined(CONFIG_CPA))
 #	define MODS_SET_MEMORY_UC(addr, pages) 0
 #	define MODS_SET_MEMORY_WC(addr, pages) 0
 #	define MODS_SET_MEMORY_WB(addr, pages) 0
@@ -389,13 +361,6 @@ int mods_unregister_all_alloc(struct mods_client *client);
 struct MODS_MEM_INFO *mods_find_alloc(struct mods_client *client,
 				      u64                 phys_addr);
 void mods_free_mem_reservations(void);
-
-#if defined(CONFIG_PPC64)
-/* ppc64 */
-int mods_unregister_all_ppc_tce_bypass(struct mods_client *client);
-
-int mods_unregister_all_nvlink_sysmem_trained(struct mods_client *client);
-#endif
 
 /* pci */
 #ifdef CONFIG_PCI
@@ -466,6 +431,8 @@ int esc_mods_iommu_dma_unmap_memory(struct mods_client               *client,
 				    struct MODS_IOMMU_DMA_MAP_MEMORY *p);
 int esc_mods_reserve_allocation(struct mods_client             *client,
 				struct MODS_RESERVE_ALLOCATION *p);
+int esc_mods_share_allocation(struct mods_client             *client,
+			      struct MODS_RESERVE_ALLOCATION *p);
 int esc_mods_get_reserved_allocation(struct mods_client             *client,
 				     struct MODS_RESERVE_ALLOCATION *p);
 int esc_mods_release_reserved_allocation(struct mods_client             *client,
@@ -478,18 +445,6 @@ int esc_mods_memory_barrier(struct mods_client *client);
 #ifdef CONFIG_ARM64
 int esc_mods_flush_cpu_cache_range(struct mods_client                *client,
 				   struct MODS_FLUSH_CPU_CACHE_RANGE *p);
-#endif
-
-#if defined(CONFIG_PPC64)
-/* ppc64 */
-int esc_mods_set_ppc_tce_bypass(struct mods_client             *client,
-				struct MODS_SET_PPC_TCE_BYPASS *p);
-int esc_mods_get_ats_address_range(struct mods_client                *client,
-				   struct MODS_GET_ATS_ADDRESS_RANGE *p);
-int esc_mods_set_nvlink_sysmem_trained(struct mods_client             *client,
-				struct MODS_SET_NVLINK_SYSMEM_TRAINED *p);
-int esc_mods_get_nvlink_line_rate(struct mods_client               *client,
-				  struct MODS_GET_NVLINK_LINE_RATE *p);
 #endif
 
 /* acpi */

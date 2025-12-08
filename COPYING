@@ -16,7 +16,6 @@ The NVIDIA MODS kernel driver package contains the following files:
   mods_krnl.c
   mods_mem.c
   mods_pci.c
-  mods_ppc64.c
   README
 
 -----------------------------------------------------------------------------

@@ -8,7 +8,7 @@
 
 /* Driver version */
 #define MODS_DRIVER_VERSION_MAJOR 4
-#define MODS_DRIVER_VERSION_MINOR 31
+#define MODS_DRIVER_VERSION_MINOR 32
 #define MODS_DRIVER_VERSION ((MODS_DRIVER_VERSION_MAJOR << 8) | \
 			     ((MODS_DRIVER_VERSION_MINOR / 10) << 4) | \
 			     (MODS_DRIVER_VERSION_MINOR % 10))
@@ -133,6 +133,7 @@ struct MODS_ALLOC_PAGES_2 {
 #define MODS_ALLOC_NO_FREE_OPTIMIZATION (1U << 8)   /* Don't cache surfaces on free */
 #define MODS_ALLOC_DMA_PAGES            (1U << 9)   /* Allocate memory from DMA region */
 #define MODS_ALLOC_DECRYPTED_MMAP       (1U << 10)  /* Allocate decrypted memory */
+#define MODS_ALLOC_DEVICE_RO            (1U << 11)  /* DMA mappings to device are read-only */
 
 /* Used by MODS_ESC_ALLOC_PAGES ioctl */
 struct MODS_ALLOC_PAGES {
@@ -211,7 +212,7 @@ struct MODS_MERGE_PAGES {
  *
  * Modifies caching attributes after the allocation.
  *
- * The allocation must be allocated with MODS_ALLOC_WRITECOMBINE and cannot be dma-mapped.
+ * The allocation must be allocated with MODS_ALLOC_CACHED and cannot be dma-mapped.
  *
  * The flags field must be either MODS_ALLOC_UNCACHED or MODS_ALLOC_WRITECOMBINE.
  */
@@ -1982,28 +1983,43 @@ struct MODS_IDLE {
 };
 
 /* Used by MODS_ESC_RESERVE_ALLOCATION, MODS_ESC_GET_RESERVED_ALLOCATION,
- * and MODS_ESC_RELEASE_RESERVED_ALLOCATION ioctls.
+ * MODS_ESC_SHARE_ALLOCATION and MODS_ESC_RELEASE_RESERVED_ALLOCATION ioctls.
  *
  * MODS_ESC_RESERVE_ALLOCATION permits the reservation of a memory allocation
  * specified by 'memory_handle' with the tag 'tag'. The 'tag' can take on
- * any values other than 0.
+ * any values other than 0.  The memory marked this way can be used by another
+ * client by retrieving it via MODS_ESC_GET_RESERVED_ALLOCATION.
+ * Note that MODS_ESC_RESERVE_ALLOCATION automatically makes the reservation
+ * claimed by the calling client.
+ * To "unclaim" the reservation before another client can use it, the client
+ * has to call MODS_ESC_FREE_PAGES, which for reserved allocations simply returns
+ * them to the pool of reservations.
+ *
+ * MODS_ESC_SHARE_ALLOCATION works like MODS_ESC_RESERVE_ALLOCATION, but the
+ * allocation can be mapped by multiple clients simultaneously.  The memory
+ * marked this way has to be marked by another client via MODS_ESC_GET_RESERVED_ALLOCATION
+ * before it can be used for mappings, but the current client does not have to
+ * unclaim it.
+ * The client should at some point "unclaim" the allocation by calling
+ * MODS_ESC_FREE_PAGES, even though this doesn't really free the memory, it merely
+ * indicates that this client will not use this memory anymore.  Note, mmap mappings
+ * can still persist after MODS_ESC_FREE_PAGES.
  *
  * MODS_ESC_GET_RESERVED_ALLOCATION is used to claim ownership of a reservation
- * specified by 'tag'. If an unclaimed reservation is found using 'tag',
+ * specified by 'tag'.  If an unclaimed reservation is found using 'tag',
  * 'memory_handle' will be populated with the allocation handle.
+ * To "unclaim" the reservation, the client can call MODS_ESC_FREE_PAGES, which
+ * for reserved allocations simply returns them to the pool of reservations.
  *
- * MODS_ESC_RELEASE_RESERVED_ALLOCATION is used to completely free and stop the
- * usage of a memory reservation made through MODS_ESC_RESERVE_ALLOCATION or
- * obtained through MODS_ESC_GET_RESERVED_ALLOCATION. The 'tag' is accepted as
- * an input to identify the reservation to release.  'memory_handle' field can
- * be either 0 or it can be the specific memory handle which has this tag.
+ * MODS_ESC_RELEASE_RESERVED_ALLOCATION is used to remove a reservation tag from
+ * a reservation claimed via MODS_ESC_GET_RESERVED_ALLOCATION.  After this call,
+ * if the client calls MODS_ESC_FREE_PAGES, the memory will be completely freed.
+ * The 'tag' is accepted as an input to identify the reservation to release.
+ * 'memory_handle' field can be either 0 or it can be the specific memory handle
+ * which has this tag.  For shared reservations, `memory_handle` must be non-zero.
  *
- * Limitations include:
- *  - Only one client may own a reservation at any given time
- *  - The client reserving the allocation automatically owns the reservation
- *  - There are two ways to "unclaim" a reservation without freeing the memory:
- *	1. Calling MODS_ESC_FREE_PAGES with the associated handle
- *	2. Closing a client
+ * Closing the client holding a claimed reserved allocation is equivalent to
+ * calling MODS_ESC_FREE_PAGES.
  */
 struct MODS_RESERVE_ALLOCATION {
 	/* IN */
@@ -2124,7 +2140,9 @@ struct MODS_RESERVE_ALLOCATION {
 #define MODS_ESC_ACPI_GET_DDC_2 MODSIO(WR, 71, MODS_ACPI_GET_DDC_2)
 /* Deprecated */
 #define MODS_ESC_GET_SCREEN_INFO MODSIO(R, 72, MODS_SCREEN_INFO)
+/* Deprecated */
 #define MODS_ESC_PCI_HOT_RESET MODSIO(W, 73, MODS_PCI_HOT_RESET)
+/* Deprecated */
 #define MODS_ESC_SET_PPC_TCE_BYPASS MODSIO(WR, 74, MODS_SET_PPC_TCE_BYPASS)
 #define MODS_ESC_DMA_MAP_MEMORY MODSIO(W, 75, MODS_DMA_MAP_MEMORY)
 #define MODS_ESC_DMA_UNMAP_MEMORY MODSIO(W, 76, MODS_DMA_MAP_MEMORY)
@@ -2172,10 +2190,13 @@ struct MODS_RESERVE_ALLOCATION {
 						  MODS_TEGRA_PROD_SET_TUPLE)
 /* Deprecated */
 #define MODS_ESC_TEGRA_PROD_ITERATE_DT MODSIO(WR, 100, MODS_TEGRA_PROD_ITERATOR)
+/* Deprecated */
 #define MODS_ESC_GET_ATS_ADDRESS_RANGE MODSIO(WR, 101, \
 					      MODS_GET_ATS_ADDRESS_RANGE)
+/* Deprecated */
 #define MODS_ESC_SET_NVLINK_SYSMEM_TRAINED MODSIO(W, 102, \
 						MODS_SET_NVLINK_SYSMEM_TRAINED)
+/* Deprecated */
 #define MODS_ESC_GET_NVLINK_LINE_RATE MODSIO(WR, 103, MODS_GET_NVLINK_LINE_RATE)
 /* Suspends system console */
 #define MODS_ESC_SUSPEND_CONSOLE _IO(MODS_IOC_MAGIC, 104)
@@ -2233,5 +2254,6 @@ struct MODS_RESERVE_ALLOCATION {
 #define MODS_ESC_GET_RESERVED_ALLOCATION MODSIO(WR, 149, MODS_RESERVE_ALLOCATION)
 #define MODS_ESC_RELEASE_RESERVED_ALLOCATION MODSIO(W, 150, MODS_RESERVE_ALLOCATION)
 #define MODS_ESC_SET_CACHE_ATTR MODSIO(W, 151, MODS_SET_CACHE_ATTR)
+#define MODS_ESC_SHARE_ALLOCATION MODSIO(W, 152, MODS_RESERVE_ALLOCATION)
 
 #endif /* _UAPI_MODS_H_  */

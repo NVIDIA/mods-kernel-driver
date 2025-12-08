@@ -384,20 +384,6 @@ error:
 }
 #endif
 
-#if defined(CONFIG_PPC64)
-static int ppc_tce_bypass = MODS_PPC_TCE_BYPASS_ON;
-
-void mods_set_ppc_tce_bypass(int bypass)
-{
-	ppc_tce_bypass = bypass;
-}
-
-int mods_get_ppc_tce_bypass(void)
-{
-	return ppc_tce_bypass;
-}
-#endif
-
 void mods_set_debug_level(int mask)
 {
 	debug = mask;
@@ -460,10 +446,6 @@ static struct mods_client *alloc_client(void)
 			INIT_LIST_HEAD(&client->enabled_devices);
 			INIT_LIST_HEAD(&client->mem_map_list);
 			INIT_LIST_HEAD(&client->free_mem_list);
-#if defined(CONFIG_PPC64)
-			INIT_LIST_HEAD(&client->ppc_tce_bypass_list);
-			INIT_LIST_HEAD(&client->nvlink_sysmem_trained_list);
-#endif
 
 			LOG_EXT();
 			return client;
@@ -658,6 +640,7 @@ module_init(mods_init_module);
 module_exit(mods_exit_module);
 
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("NVIDIA diagnostic driver");
 
 #define STRING_VALUE(x) #x
 #define MAKE_MODULE_VERSION(x, y) STRING_VALUE(x) "." STRING_VALUE(y)
@@ -671,12 +654,6 @@ MODULE_PARM_DESC(debug,
 module_param(multi_instance, int, 0644);
 MODULE_PARM_DESC(multi_instance,
 	"allows more than one client to simultaneously open the driver");
-
-#if defined(CONFIG_PPC64)
-module_param(ppc_tce_bypass, int, 0644);
-MODULE_PARM_DESC(ppc_tce_bypass,
-	"PPC TCE bypass (0=sys default, 1=force bypass, 2=force non bypass)");
-#endif
 
 /********************
  * HELPER FUNCTIONS *
@@ -968,8 +945,7 @@ static int mods_krnl_vma_access(struct vm_area_struct *vma,
 	}
 
 	if (unlikely(!p_map_mem || addr < p_map_mem->virtual_addr ||
-		     addr + len > p_map_mem->virtual_addr +
-				  p_map_mem->mapping_length)) {
+		     addr + len > p_map_mem->virtual_addr + p_map_mem->mapping_length)) {
 		cl_error("mapped range [virt 0x%lx, size 0x%x] does not match vma [virt 0x%lx, size 0x%lx]\n",
 			 addr, len, vma->vm_start, vma->vm_end - vma->vm_start);
 		mutex_unlock(&client->mtx);
@@ -1109,20 +1085,6 @@ static int mods_krnl_close(struct inode *ip, struct file *fp)
 		cl_error("failed to free all memory\n");
 	final_err = err;
 
-#if defined(CONFIG_PPC64)
-	err = mods_unregister_all_ppc_tce_bypass(client);
-	if (err)
-		cl_error("failed to restore dma bypass\n");
-	if (!final_err)
-		final_err = err;
-
-	err = mods_unregister_all_nvlink_sysmem_trained(client);
-	if (err)
-		cl_error("failed to free nvlink trained\n");
-	if (!final_err)
-		final_err = err;
-#endif
-
 #if defined(CONFIG_TEGRA_IVC)
 	mods_bpmpipc_cleanup();
 #endif
@@ -1134,9 +1096,7 @@ static int mods_krnl_close(struct inode *ip, struct file *fp)
 		const int num_pages  = atomic_read(&client->num_pages);
 
 		if (num_allocs || num_pages) {
-			cl_error(
-				"not all allocations have been freed, allocs=%d, pages=%d\n",
-				num_allocs, num_pages);
+			cl_error("not all allocations have been freed, allocs=%d, pages=%d\n", num_allocs, num_pages);
 			if (!final_err)
 				final_err = -ENOMEM;
 		}
@@ -1236,7 +1196,7 @@ static int map_system_mem(struct mods_client    *client,
 {
 	struct scatterlist *sg          = NULL;
 	const char         *cache_str   = mods_get_prot_str(p_mem_info->cache_type);
-	const phys_addr_t   req_pa = (phys_addr_t)vma->vm_pgoff << PAGE_SHIFT;
+	const phys_addr_t   req_pa      = (phys_addr_t)vma->vm_pgoff << PAGE_SHIFT;
 	phys_addr_t         reg_pa      = 0;
 	const unsigned long vma_size    = vma->vm_end - vma->vm_start;
 	unsigned long       size_to_map = vma_size;
@@ -1245,9 +1205,7 @@ static int map_system_mem(struct mods_client    *client,
 	const u32           num_chunks  = get_num_chunks(p_mem_info);
 	u32                 map_chunks;
 	u32                 i           = 0;
-	pgprot_t            prot        = get_prot(client,
-						   p_mem_info->cache_type,
-						   vma->vm_page_prot);
+	pgprot_t            prot        = get_prot(client, p_mem_info->cache_type, vma->vm_page_prot);
 
 #ifdef MODS_HAS_PGPROT_DECRYPTED
 	if (p_mem_info->decrypted_mmap)
@@ -2305,6 +2263,12 @@ static long mods_krnl_ioctl(struct file  *fp,
 			   MODS_RESERVE_ALLOCATION);
 		break;
 
+	case MODS_ESC_SHARE_ALLOCATION:
+		MODS_IOCTL(MODS_ESC_SHARE_ALLOCATION,
+			   esc_mods_share_allocation,
+			   MODS_RESERVE_ALLOCATION);
+		break;
+
 	case MODS_ESC_GET_RESERVED_ALLOCATION:
 		MODS_IOCTL(MODS_ESC_GET_RESERVED_ALLOCATION,
 			   esc_mods_get_reserved_allocation,
@@ -2363,38 +2327,6 @@ static long mods_krnl_ioctl(struct file  *fp,
 		MODS_IOCTL(MODS_ESC_PHYSICAL_TO_VIRTUAL,
 			   esc_mods_phys_to_virtual, MODS_PHYSICAL_TO_VIRTUAL);
 		break;
-
-#if defined(CONFIG_PPC64)
-	case MODS_ESC_PCI_HOT_RESET:
-		MODS_IOCTL_NORETVAL(MODS_ESC_PCI_HOT_RESET,
-				    esc_mods_pci_hot_reset,
-				    MODS_PCI_HOT_RESET);
-		break;
-
-	case MODS_ESC_SET_PPC_TCE_BYPASS:
-		MODS_IOCTL(MODS_ESC_SET_PPC_TCE_BYPASS,
-			   esc_mods_set_ppc_tce_bypass,
-			   MODS_SET_PPC_TCE_BYPASS);
-		break;
-
-	case MODS_ESC_GET_ATS_ADDRESS_RANGE:
-		MODS_IOCTL(MODS_ESC_GET_ATS_ADDRESS_RANGE,
-			   esc_mods_get_ats_address_range,
-			   MODS_GET_ATS_ADDRESS_RANGE);
-		break;
-
-	case MODS_ESC_SET_NVLINK_SYSMEM_TRAINED:
-		MODS_IOCTL(MODS_ESC_SET_NVLINK_SYSMEM_TRAINED,
-			   esc_mods_set_nvlink_sysmem_trained,
-			   MODS_SET_NVLINK_SYSMEM_TRAINED);
-		break;
-
-	case MODS_ESC_GET_NVLINK_LINE_RATE:
-		MODS_IOCTL(MODS_ESC_GET_NVLINK_LINE_RATE,
-			   esc_mods_get_nvlink_line_rate,
-			   MODS_GET_NVLINK_LINE_RATE);
-		break;
-#endif
 
 #ifdef CONFIG_PCI
 	case MODS_ESC_DMA_MAP_MEMORY:

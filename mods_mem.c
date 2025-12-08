@@ -56,52 +56,14 @@ static bool validate_mem_handle(struct mods_client   *client,
 	return false;
 }
 
+static u64 get_client_mask(struct mods_client *client)
+{
+	return (u64)1u << (client->client_id - 1);
+}
+
 /****************************
  * DMA MAP HELPER FUNCTIONS *
  ****************************/
-
-/*
- * Starting on Power9 systems, DMA addresses for NVLink are no longer
- * the same as used over PCIE.
- *
- * Power9 supports a 56-bit Real Address. This address range is compressed
- * when accessed over NvLink to allow the GPU to access all of memory using
- * its 47-bit Physical address.
- *
- * If there is an NPU device present on the system, it implies that NvLink
- * sysmem links are present and we need to apply the required address
- * conversion for NvLink within the driver. This is intended to be temporary
- * to ease the transition to kernel APIs to handle NvLink DMA mappings
- * via the NPU device.
- *
- * Note, a deviation from the documented compression scheme is that the
- * upper address bits (i.e. bit 56-63) instead of being set to zero are
- * preserved during NvLink address compression so the orignal PCIE DMA
- * address can be reconstructed on expansion. These bits can be safely
- * ignored on NvLink since they are truncated by the GPU.
- */
-#if defined(CONFIG_PPC64) && defined(CONFIG_PCI)
-static dma_addr_t compress_nvlink_addr(struct pci_dev *dev, dma_addr_t addr)
-{
-	dma_addr_t addr47 = addr;
-
-	/* Note, one key difference from the documented compression scheme
-	 * is that BIT59 used for TCE bypass mode on PCIe is preserved during
-	 * NVLink address compression to allow for the resulting DMA address to
-	 * be used transparently on PCIe.
-	 */
-	if (dev && has_npu_dev(dev, 0)) {
-		addr47 = addr & (1LLU << 59);
-		addr47 |= ((addr >> 45) & 0x3) << 43;
-		addr47 |= ((addr >> 49) & 0x3) << 45;
-		addr47 |= addr & ((1LLU << 43) - 1);
-	}
-
-	return addr47;
-}
-#else
-#define compress_nvlink_addr(dev, addr) (addr)
-#endif
 
 static void copy_wc_bitmap(struct MODS_MEM_INFO *p_dest_mem_info,
 			   unsigned long         first_dst_chunk,
@@ -164,12 +126,18 @@ static void print_map_info(struct mods_client *client,
 	}
 }
 
+static enum dma_data_direction get_dma_dir(struct MODS_MEM_INFO *p_mem_info)
+{
+	return p_mem_info->device_ro ? DMA_TO_DEVICE : DMA_BIDIRECTIONAL;
+}
+
 #if defined(CONFIG_PCI) || defined(MODS_HAS_TEGRA)
-static int map_sg(struct mods_client *client,
-		  struct device      *dev,
-		  struct scatterlist *sg,
-		  u32                 num_chunks,
-		  u32                 num_pages)
+static int map_sg(struct mods_client     *client,
+		  struct device          *dev,
+		  struct scatterlist     *sg,
+		  u32                     num_chunks,
+		  u32                     num_pages,
+		  enum dma_data_direction dir)
 {
 	const u32 max_pages = (u32)(0x100000000ULL >> PAGE_SHIFT);
 
@@ -207,8 +175,7 @@ static int map_sg(struct mods_client *client,
 			}
 		}
 
-		mapped = dma_map_sg(dev, sg, (int)chunks_to_map,
-				    DMA_BIDIRECTIONAL);
+		mapped = dma_map_sg(dev, sg, (int)chunks_to_map, dir);
 
 		if (mapped == 0) {
 			cl_error(
@@ -231,9 +198,10 @@ static int map_sg(struct mods_client *client,
 }
 #endif
 
-static void unmap_sg(struct device      *dev,
-		     struct scatterlist *sg,
-		     u32                 num_chunks)
+static void unmap_sg(struct device          *dev,
+		     struct scatterlist     *sg,
+		     u32                     num_chunks,
+		     enum dma_data_direction dir)
 {
 	do {
 		struct scatterlist *cur_sg;
@@ -243,7 +211,7 @@ static void unmap_sg(struct device      *dev,
 			if (!sg_dma_len(cur_sg))
 				break;
 
-		dma_unmap_sg(dev, sg, (int)chunks_to_unmap, DMA_BIDIRECTIONAL);
+		dma_unmap_sg(dev, sg, (int)chunks_to_unmap, dir);
 
 		sg_dma_address(sg) = 0;
 
@@ -274,7 +242,7 @@ static void dma_unmap_and_free(struct mods_client   *client,
 
 	print_map_info(client, "unmap", p_del_map->sg, nents, p_del_map->dev);
 
-	unmap_sg(p_del_map->dev, p_del_map->sg, nents);
+	unmap_sg(p_del_map->dev, p_del_map->sg, nents, get_dma_dir(p_mem_info));
 
 	pci_dev_put(p_del_map->pcidev);
 
@@ -300,7 +268,8 @@ static int dma_unmap_all(struct mods_client   *client,
 
 		unmap_sg(&p_mem_info->dev->dev,
 			 p_mem_info->sg,
-			 get_num_chunks(p_mem_info));
+			 get_num_chunks(p_mem_info),
+			 get_dma_dir(p_mem_info));
 	}
 #endif
 
@@ -335,7 +304,13 @@ static int create_dma_map(struct mods_client   *client,
 	u32                  i;
 	int                  err;
 
-	if (unlikely(p_mem_info->reservation_tag)) {
+	if (unlikely(p_mem_info->shared && !p_mem_info->device_ro)) {
+		cl_error("unable to dma map shared reservation with tag 0x%llx as writable\n",
+			 (unsigned long long)p_mem_info->reservation_tag);
+		return -EINVAL;
+	}
+
+	if (unlikely(!p_mem_info->shared && p_mem_info->reservation_tag)) {
 		cl_error("unable to dma map reserved memory with tag 0x%llx\n",
 			 (unsigned long long)p_mem_info->reservation_tag);
 		return -EINVAL;
@@ -363,7 +338,7 @@ static int create_dma_map(struct mods_client   *client,
 		sg_set_page(&p_dma_map->sg[i], sg_page(sg), sg->length, 0);
 
 	err = map_sg(client, dev, p_dma_map->sg, num_chunks,
-		     p_mem_info->num_pages);
+		     p_mem_info->num_pages, get_dma_dir(p_mem_info));
 
 	print_map_info(client, "map", p_dma_map->sg, num_chunks, dev);
 
@@ -395,6 +370,7 @@ static int dma_map_to_default_dev(struct mods_client   *client,
 			 p_mem_info->reservation_tag);
 		return -EINVAL;
 	}
+	WARN_ON(p_mem_info->shared);
 
 	if (sg_dma_address(p_mem_info->sg)) {
 		cl_debug(DEBUG_MEM_DETAILED,
@@ -405,7 +381,7 @@ static int dma_map_to_default_dev(struct mods_client   *client,
 	}
 
 	err = map_sg(client, dev, p_mem_info->sg, num_chunks,
-		     p_mem_info->num_pages);
+		     p_mem_info->num_pages, get_dma_dir(p_mem_info));
 
 	print_map_info(client, "map default", p_mem_info->sg, num_chunks, dev);
 
@@ -519,9 +495,6 @@ static void save_non_wb_chunks(struct mods_client   *client,
 	if (p_mem_info->no_free_opt)
 		return;
 
-	if (unlikely(mutex_lock_interruptible(&client->mtx)))
-		return;
-
 	/* Steal the chunks from MODS_MEM_INFO and put them on free list. */
 
 	for_each_sg(p_mem_info->alloc_sg, sg, p_mem_info->num_chunks, ichunk) {
@@ -564,8 +537,6 @@ static void save_non_wb_chunks(struct mods_client   *client,
 
 		list_add(&free_chunk->list, &client->free_mem_list);
 	}
-
-	mutex_unlock(&client->mtx);
 }
 
 static int restore_cache_one_chunk(struct page *p_page, u8 order)
@@ -603,8 +574,6 @@ static int release_free_chunks(struct mods_client *client)
 	unsigned long     pages_freed  = 0;
 	int               final_err    = 0;
 
-	mutex_lock(&client->mtx);
-
 	head = &client->free_mem_list;
 
 	list_for_each_prev_safe(iter, next, head) {
@@ -636,8 +605,6 @@ static int release_free_chunks(struct mods_client *client)
 		kfree(free_chunk);
 		atomic_dec(&client->num_allocs);
 	}
-
-	mutex_unlock(&client->mtx);
 
 	if (pages_freed) {
 		cl_debug(DEBUG_MEM, "released %lu free WC/UC pages, restored cache on %lu free chunks\n",
@@ -712,7 +679,7 @@ static void release_chunks(struct mods_client   *client,
 				       PAGE_SIZE << order,
 				       sg_page(sg),
 				       sg_dma_address(sg),
-				       DMA_BIDIRECTIONAL);
+				       get_dma_dir(p_mem_info));
 #endif
 		} else
 			__free_pages(sg_page(sg), order);
@@ -802,7 +769,7 @@ static struct page *alloc_chunk(struct mods_client   *client,
 		p_page = dma_alloc_pages(&p_mem_info->dev->dev,
 					 PAGE_SIZE << order,
 					 dma_handle,
-					 DMA_BIDIRECTIONAL,
+					 get_dma_dir(p_mem_info),
 					 GFP_KERNEL | __GFP_NORETRY | __GFP_NOWARN);
 #endif
 	} else
@@ -996,7 +963,18 @@ static int register_alloc(struct mods_client   *client,
 		mutex_unlock(&client->mtx);
 	}
 
+	WARN_ON(p_mem_info->shared);
+
 	return err;
+}
+
+static void add_to_reservations(struct mods_client   *client,
+				struct MODS_MEM_INFO *p_mem_info)
+{
+	/* Decrement client num_pages manually if not releasing chunks */
+	atomic_sub((int)p_mem_info->num_pages, &client->num_pages);
+	list_add(&p_mem_info->list, &avail_mem_reservations);
+	atomic_dec(&client->num_allocs); /* Don't indicate a leak in this client */
 }
 
 static int unregister_and_free_alloc(struct mods_client   *client,
@@ -1008,8 +986,6 @@ static int unregister_and_free_alloc(struct mods_client   *client,
 	int                   err;
 
 	cl_debug(DEBUG_MEM_DETAILED, "free %p\n", p_del_mem);
-
-	mutex_lock(&client->mtx);
 
 	head = &client->mem_alloc_list;
 
@@ -1024,25 +1000,27 @@ static int unregister_and_free_alloc(struct mods_client   *client,
 		p_mem_info = NULL;
 	}
 
-	mutex_unlock(&client->mtx);
-
 	if (likely(p_mem_info)) {
+		WARN_ON(p_mem_info->shared);
 		dma_unmap_all(client, p_mem_info, NULL);
 		if (likely(!p_mem_info->reservation_tag)) {
 			save_non_wb_chunks(client, p_mem_info);
+
 			release_chunks(client, p_mem_info);
 
 			pci_dev_put(p_mem_info->dev);
 
 			free_mem_info(client, p_mem_info);
-		} else {
-			/* Decrement client num_pages manually if not releasing chunks */
-			atomic_sub((int)p_mem_info->num_pages, &client->num_pages);
-			mutex_lock(&mem_reservation_mtx);
-			list_add(&p_mem_info->list, &avail_mem_reservations);
-			mutex_unlock(&mem_reservation_mtx);
-			atomic_dec(&client->num_allocs); /* Don't indicate a leak in this client */
-		}
+		} else
+			add_to_reservations(client, p_mem_info);
+		err = OK;
+	} else if (p_del_mem->shared) {
+		WARN_ON(!p_del_mem->reservation_tag);
+
+		dma_unmap_all(client, p_del_mem, NULL);
+
+		p_del_mem->shared_client_mask &= ~get_client_mask(client);
+
 		err = OK;
 	} else {
 		cl_error("failed to unregister allocation %p\n", p_del_mem);
@@ -1054,25 +1032,41 @@ static int unregister_and_free_alloc(struct mods_client   *client,
 
 int mods_unregister_all_alloc(struct mods_client *client)
 {
-	int               final_err = OK;
-	int               err;
-	struct list_head *head      = &client->mem_alloc_list;
-	struct list_head *iter;
-	struct list_head *tmp;
+	struct list_head     *head        = &client->mem_alloc_list;
+	struct list_head     *iter;
+	struct list_head     *tmp;
+	struct MODS_MEM_INFO *p_mem_info;
+	const u64             client_mask = get_client_mask(client);
+	int                   final_err   = OK;
+	int                   err;
+
+	mutex_lock(&client->mtx);
+	mutex_lock(&mem_reservation_mtx);
 
 	list_for_each_safe(iter, tmp, head) {
-
-		struct MODS_MEM_INFO *p_mem_info;
-
 		p_mem_info = list_entry(iter, struct MODS_MEM_INFO, list);
 		err = unregister_and_free_alloc(client, p_mem_info);
 		if (likely(!final_err))
 			final_err = err;
 	}
 
+	head = &avail_mem_reservations;
+	list_for_each(iter, head) {
+		p_mem_info = list_entry(iter, struct MODS_MEM_INFO, list);
+		if (p_mem_info->shared_client_mask & client_mask) {
+			WARN_ON(!p_mem_info->shared);
+			err = unregister_and_free_alloc(client, p_mem_info);
+			if (likely(!final_err))
+				final_err = err;
+		}
+	}
+	mutex_unlock(&mem_reservation_mtx);
+
 	err = release_free_chunks(client);
 	if (likely(!final_err))
 		final_err = err;
+
+	mutex_unlock(&client->mtx);
 
 	return final_err;
 }
@@ -1119,6 +1113,13 @@ static int get_addr_range(struct mods_client                 *client,
 		return err;
 	}
 
+	err = mutex_lock_interruptible(&mem_reservation_mtx);
+	if (err) {
+		mutex_unlock(&client->mtx);
+		LOG_EXT();
+		return err;
+	}
+
 	/* If pcidev was specified, retrieve IOVA,
 	 * otherwise retrieve physical address.
 	 */
@@ -1135,6 +1136,7 @@ static int get_addr_range(struct mods_client                 *client,
 		}
 
 		if (err) {
+			mutex_unlock(&mem_reservation_mtx);
 			mutex_unlock(&client->mtx);
 
 			cl_error(
@@ -1166,9 +1168,7 @@ static int get_addr_range(struct mods_client                 *client,
 		}
 
 		if (pcidev) {
-			dma_addr_t addr = sg_dma_address(sg) + offs;
-
-			addr = compress_nvlink_addr(p_mem_info->dev, addr);
+			const dma_addr_t addr = sg_dma_address(sg) + offs;
 
 			p->physical_address = (u64)addr;
 		} else {
@@ -1179,6 +1179,7 @@ static int get_addr_range(struct mods_client                 *client,
 		break;
 	}
 
+	mutex_unlock(&mem_reservation_mtx);
 	mutex_unlock(&client->mtx);
 
 	if (err && pcidev) {
@@ -1239,15 +1240,36 @@ struct MODS_MEM_INFO *mods_find_alloc(struct mods_client *client, u64 phys_addr)
 	struct list_head     *plist_head = &client->mem_alloc_list;
 	struct list_head     *plist_iter;
 	struct MODS_MEM_INFO *p_mem_info;
-	u64                   offset;
 
 	list_for_each(plist_iter, plist_head) {
-		p_mem_info = list_entry(plist_iter,
-					struct MODS_MEM_INFO,
-					list);
+		u64 offset;
+
+		p_mem_info = list_entry(plist_iter, struct MODS_MEM_INFO, list);
 
 		if (!get_alloc_offset(p_mem_info, phys_addr, &offset))
 			return p_mem_info;
+	}
+
+	if (!p_mem_info) {
+
+		const u64 client_mask = get_client_mask(client);
+
+		mutex_lock(&mem_reservation_mtx);
+
+		plist_head = &avail_mem_reservations;
+		list_for_each(plist_iter, plist_head) {
+			p_mem_info = list_entry(plist_iter, struct MODS_MEM_INFO, list);
+
+			if (p_mem_info->shared_client_mask & client_mask) {
+				u64 offset;
+
+				if (!get_alloc_offset(p_mem_info, phys_addr, &offset)) {
+					mutex_unlock(&mem_reservation_mtx);
+					return p_mem_info;
+				}
+			}
+		}
+		mutex_unlock(&mem_reservation_mtx);
 	}
 
 	/* The physical address doesn't belong to any allocation */
@@ -1454,16 +1476,6 @@ int esc_mods_alloc_pages_2(struct mods_client        *client,
 	}
 #endif
 
-#ifdef CONFIG_PPC64
-	if (unlikely((p->flags & MODS_ALLOC_CACHE_MASK) != MODS_ALLOC_CACHED)) {
-		cl_error("unsupported cache attr %u (%s)\n",
-			 p->flags & MODS_ALLOC_CACHE_MASK,
-			 mods_get_prot_str(p->flags & MODS_ALLOC_CACHE_MASK));
-		err = -ENOMEM;
-		goto failed;
-	}
-#endif
-
 	cache_type = (u8)(p->flags & MODS_ALLOC_CACHE_MASK);
 
 	p_mem_info = alloc_mem_info(client, num_chunks, cache_type, &alloc_size);
@@ -1479,8 +1491,8 @@ int esc_mods_alloc_pages_2(struct mods_client        *client,
 
 	p_mem_info->num_pages       = num_pages;
 	p_mem_info->dma32           = (p->flags & MODS_ALLOC_DMA32) ? true : false;
-	p_mem_info->force_numa      = (p->flags & MODS_ALLOC_FORCE_NUMA)
-				      ? true : false;
+	p_mem_info->device_ro       = (p->flags & MODS_ALLOC_DEVICE_RO) ? true : false;
+	p_mem_info->force_numa      = (p->flags & MODS_ALLOC_FORCE_NUMA) ? true : false;
 	p_mem_info->no_free_opt     = (p->flags & MODS_ALLOC_NO_FREE_OPTIMIZATION) ||
 				      (p->flags & MODS_ALLOC_DMA_PAGES) ||
 				      (p->flags & MODS_ALLOC_DECRYPTED_MMAP)
@@ -1497,8 +1509,7 @@ int esc_mods_alloc_pages_2(struct mods_client        *client,
 #endif
 	p_mem_info->dev             = NULL;
 
-	if ((p->flags & MODS_ALLOC_USE_NUMA) &&
-	    p->numa_node != MODS_ANY_NUMA_NODE)
+	if ((p->flags & MODS_ALLOC_USE_NUMA) && p->numa_node != MODS_ANY_NUMA_NODE)
 		p_mem_info->numa_node = p->numa_node;
 
 #ifdef CONFIG_PCI
@@ -1521,15 +1532,6 @@ int esc_mods_alloc_pages_2(struct mods_client        *client,
 		if (!(p->flags & MODS_ALLOC_USE_NUMA))
 			p_mem_info->numa_node = dev_to_node(&dev->dev);
 
-#ifdef CONFIG_PPC64
-		if (!mods_is_nvlink_sysmem_trained(client, dev)) {
-			/* Until NvLink is trained, we must use memory
-			 * on node 0.
-			 */
-			if (has_npu_dev(dev, 0))
-				p_mem_info->numa_node = 0;
-		}
-#endif
 		cl_debug(DEBUG_MEM_DETAILED,
 			 "affinity dev %04x:%02x:%02x.%x node %d\n",
 			 p->pci_device.domain,
@@ -1718,10 +1720,26 @@ int esc_mods_free_pages(struct mods_client *client, struct MODS_FREE_PAGES *p)
 
 	LOG_ENT();
 
+	err = mutex_lock_interruptible(&client->mtx);
+	if (err) {
+		LOG_EXT();
+		return err;
+	}
+
+	err = mutex_lock_interruptible(&mem_reservation_mtx);
+	if (err) {
+		mutex_unlock(&client->mtx);
+		LOG_EXT();
+		return err;
+	}
+
 	p_mem_info = get_mem_handle(client, p->memory_handle);
 
 	if (likely(p_mem_info))
 		err = unregister_and_free_alloc(client, p_mem_info);
+
+	mutex_unlock(&mem_reservation_mtx);
+	mutex_unlock(&client->mtx);
 
 	LOG_EXT();
 
@@ -1738,7 +1756,9 @@ int esc_mods_set_cache_attr(struct mods_client         *client,
 
 	LOG_ENT();
 
-	if (p->flags != MODS_ALLOC_UNCACHED && p->flags != MODS_ALLOC_WRITECOMBINE) {
+	if (p->flags != MODS_ALLOC_UNCACHED &&
+	    p->flags != MODS_ALLOC_WRITECOMBINE &&
+	    p->flags != MODS_ALLOC_DEVICE_RO) {
 		cl_error("unsupported caching attribute %u\n", p->flags);
 		LOG_EXT();
 		return -EINVAL;
@@ -1758,8 +1778,19 @@ int esc_mods_set_cache_attr(struct mods_client         *client,
 		goto failed;
 	}
 
-	if (unlikely(!validate_mem_handle(client, p_mem_info))) {
+	if (unlikely(p_mem_info->shared || !validate_mem_handle(client, p_mem_info))) {
 		cl_error("invalid handle %p\n", p_mem_info);
+		goto failed;
+	}
+
+	if (unlikely(!list_empty(&p_mem_info->dma_map_list) || sg_dma_address(p_mem_info->sg))) {
+		cl_error("handle %p has dma mappings and cache type cannot be changed\n", p_mem_info);
+		goto failed;
+	}
+
+	if (p->flags == MODS_ALLOC_DEVICE_RO) {
+		p_mem_info->device_ro = true;
+		err = 0;
 		goto failed;
 	}
 
@@ -1771,11 +1802,6 @@ int esc_mods_set_cache_attr(struct mods_client         *client,
 
 	if (p_mem_info->cache_type != MODS_ALLOC_CACHED) {
 		cl_error("cannot change cache type for handle %p\n", p_mem_info);
-		goto failed;
-	}
-
-	if (unlikely(!list_empty(&p_mem_info->dma_map_list) || sg_dma_address(p_mem_info->sg))) {
-		cl_error("handle %p has dma mappings and cache type cannot be changed\n", p_mem_info);
 		goto failed;
 	}
 
@@ -1860,7 +1886,7 @@ int esc_mods_merge_pages(struct mods_client      *client,
 
 		p_mem_info = get_mem_handle(client, p->in_memory_handles[0]);
 
-		if (unlikely(!validate_mem_handle(client, p_mem_info))) {
+		if (unlikely(!validate_mem_handle(client, p_mem_info) || p_mem_info->shared)) {
 			cl_error("handle 0: invalid handle %p\n", p_mem_info);
 			err = -EINVAL;
 			goto failed;
@@ -1885,7 +1911,7 @@ int esc_mods_merge_pages(struct mods_client      *client,
 			phys_addr_t  next_pa;
 			unsigned int j;
 
-			if (!validate_mem_handle(client, p_other)) {
+			if (unlikely(!validate_mem_handle(client, p_other) || p_other->shared)) {
 				cl_error("handle %u: invalid handle %p\n",
 					 i, p);
 				err = -EINVAL;
@@ -2226,6 +2252,13 @@ int esc_mods_virtual_to_phys(struct mods_client              *client,
 		return err;
 	}
 
+	err = mutex_lock_interruptible(&mem_reservation_mtx);
+	if (unlikely(err)) {
+		mutex_unlock(&client->mtx);
+		LOG_EXT();
+		return err;
+	}
+
 	head = &client->mem_map_list;
 
 	list_for_each(iter, head) {
@@ -2243,24 +2276,21 @@ int esc_mods_virtual_to_phys(struct mods_client              *client,
 
 			/* device memory mapping */
 			if (!p_map_mem->p_mem_info) {
-				p->physical_address = p_map_mem->phys_addr
-						      + virt_offs;
-				mutex_unlock(&client->mtx);
-
+				p->physical_address = p_map_mem->phys_addr + virt_offs;
 				cl_debug(DEBUG_MEM_DETAILED,
 					 "get phys: map %p virt 0x%llx -> 0x%llx\n",
 					 p_map_mem,
 					 p->virtual_address,
 					 p->physical_address);
 
-				LOG_EXT();
-				return OK;
+				err = OK;
+				goto done;
 			}
 
-			range.memory_handle =
-				(u64)(size_t)p_map_mem->p_mem_info;
+			range.memory_handle = (u64)(size_t)p_map_mem->p_mem_info;
 			range.offset = virt_offs + p_map_mem->mapping_offs;
 
+			mutex_unlock(&mem_reservation_mtx);
 			mutex_unlock(&client->mtx);
 
 			err = get_addr_range(client, &range, NULL);
@@ -2282,11 +2312,15 @@ int esc_mods_virtual_to_phys(struct mods_client              *client,
 		}
 	}
 
+	cl_error("invalid virtual address 0x%llx\n", p->virtual_address);
+	err = -EINVAL;
+
+done:
+	mutex_unlock(&mem_reservation_mtx);
 	mutex_unlock(&client->mtx);
 
-	cl_error("invalid virtual address 0x%llx\n", p->virtual_address);
 	LOG_EXT();
-	return -EINVAL;
+	return err;
 }
 
 int esc_mods_phys_to_virtual(struct mods_client              *client,
@@ -2307,6 +2341,13 @@ int esc_mods_phys_to_virtual(struct mods_client              *client,
 		return err;
 	}
 
+	err = mutex_lock_interruptible(&mem_reservation_mtx);
+	if (unlikely(err)) {
+		mutex_unlock(&client->mtx);
+		LOG_EXT();
+		return err;
+	}
+
 	head = &client->mem_map_list;
 
 	list_for_each(iter, head) {
@@ -2314,16 +2355,14 @@ int esc_mods_phys_to_virtual(struct mods_client              *client,
 
 		/* device memory mapping */
 		if (!p_map_mem->p_mem_info) {
-			u64 end = p_map_mem->phys_addr
-				+ p_map_mem->mapping_length;
+			u64 end = p_map_mem->phys_addr + p_map_mem->mapping_length;
+
 			if (p->physical_address <  p_map_mem->phys_addr ||
 			    p->physical_address >= end)
 				continue;
 
 			offset = p->physical_address - p_map_mem->phys_addr;
-			p->virtual_address = p_map_mem->virtual_addr
-					     + offset;
-			mutex_unlock(&client->mtx);
+			p->virtual_address = p_map_mem->virtual_addr + offset;
 
 			cl_debug(DEBUG_MEM_DETAILED,
 				 "get virt: map %p phys 0x%llx -> 0x%llx\n",
@@ -2331,14 +2370,12 @@ int esc_mods_phys_to_virtual(struct mods_client              *client,
 				 p->physical_address,
 				 p->virtual_address);
 
-			LOG_EXT();
-			return OK;
+			err = OK;
+			goto done;
 		}
 
 		/* offset from the beginning of the allocation */
-		if (get_alloc_offset(p_map_mem->p_mem_info,
-				     p->physical_address,
-				     &offset))
+		if (get_alloc_offset(p_map_mem->p_mem_info, p->physical_address, &offset))
 			continue;
 
 		/* offset from the beginning of the mapping */
@@ -2346,26 +2383,28 @@ int esc_mods_phys_to_virtual(struct mods_client              *client,
 
 		if ((offset >= map_offset) &&
 		    (offset <  map_offset + p_map_mem->mapping_length)) {
-			p->virtual_address = p_map_mem->virtual_addr
-					   + offset - map_offset;
+			p->virtual_address = p_map_mem->virtual_addr + offset - map_offset;
 
-			mutex_unlock(&client->mtx);
 			cl_debug(DEBUG_MEM_DETAILED,
 				 "get virt: map %p phys 0x%llx -> 0x%llx\n",
 				 p_map_mem,
 				 p->physical_address,
 				 p->virtual_address);
 
-			LOG_EXT();
-			return OK;
+			err = OK;
+			goto done;
 		}
 	}
 
+	cl_error("phys addr 0x%llx is not mapped\n", p->physical_address);
+	err = -EINVAL;
+
+done:
+	mutex_unlock(&mem_reservation_mtx);
 	mutex_unlock(&client->mtx);
 
-	cl_error("phys addr 0x%llx is not mapped\n", p->physical_address);
 	LOG_EXT();
-	return -EINVAL;
+	return err;
 }
 
 #if defined(CONFIG_ARM)
@@ -2385,6 +2424,7 @@ int esc_mods_dma_map_memory(struct mods_client         *client,
 	struct MODS_DMA_MAP  *p_dma_map;
 	struct pci_dev       *dev    = NULL;
 	int                   err    = -EINVAL;
+	bool                  shared = false;
 	bool                  locked = false;
 
 	LOG_ENT();
@@ -2392,10 +2432,18 @@ int esc_mods_dma_map_memory(struct mods_client         *client,
 	p_mem_info = get_mem_handle(client, p->memory_handle);
 	if (unlikely(!p_mem_info))
 		goto failed;
+	shared = p_mem_info->shared;
 
 	err = mutex_lock_interruptible(&client->mtx);
 	if (unlikely(err))
 		goto failed;
+	if (shared) {
+		err = mutex_lock_interruptible(&mem_reservation_mtx);
+		if (unlikely(err)) {
+			mutex_unlock(&client->mtx);
+			goto failed;
+		}
+	}
 	locked = true;
 
 	if (mods_is_pci_dev(p_mem_info->dev, &p->pci_device)) {
@@ -2406,6 +2454,8 @@ int esc_mods_dma_map_memory(struct mods_client         *client,
 	if (mods_is_pci_dev(client->cached_dev, &p->pci_device))
 		dev = pci_dev_get(client->cached_dev);
 	else {
+		if (shared)
+			mutex_unlock(&mem_reservation_mtx);
 		mutex_unlock(&client->mtx);
 		locked = false;
 
@@ -2423,6 +2473,13 @@ int esc_mods_dma_map_memory(struct mods_client         *client,
 		err = mutex_lock_interruptible(&client->mtx);
 		if (unlikely(err))
 			goto failed;
+		if (shared) {
+			err = mutex_lock_interruptible(&mem_reservation_mtx);
+			if (unlikely(err)) {
+				mutex_unlock(&client->mtx);
+				goto failed;
+			}
+		}
 		locked = true;
 	}
 
@@ -2441,8 +2498,11 @@ int esc_mods_dma_map_memory(struct mods_client         *client,
 	err = create_dma_map(client, p_mem_info, dev, &dev->dev);
 
 failed:
-	if (locked)
+	if (locked) {
+		if (shared)
+			mutex_unlock(&mem_reservation_mtx);
 		mutex_unlock(&client->mtx);
+	}
 
 	pci_dev_put(dev);
 
@@ -2477,9 +2537,18 @@ int esc_mods_dma_unmap_memory(struct mods_client         *client,
 	err = mutex_lock_interruptible(&client->mtx);
 	if (unlikely(err))
 		goto failed;
+	if (p_mem_info->shared) {
+		err = mutex_lock_interruptible(&mem_reservation_mtx);
+		if (unlikely(err)) {
+			mutex_unlock(&client->mtx);
+			goto failed;
+		}
+	}
 
 	err = dma_unmap_all(client, p_mem_info, &dev->dev);
 
+	if (p_mem_info->shared)
+		mutex_unlock(&mem_reservation_mtx);
 	mutex_unlock(&client->mtx);
 
 failed:
@@ -2513,7 +2582,7 @@ int esc_mods_iommu_dma_map_memory(struct mods_client               *client,
 		cl_error("contiguous flag not set\n");
 
 	p_mem_info = get_mem_handle(client, p->memory_handle);
-	if (unlikely(!p_mem_info))
+	if (unlikely(!p_mem_info || p_mem_info->shared))
 		goto failed;
 
 	if (!list_empty(&p_mem_info->dma_map_list)) {
@@ -2589,7 +2658,7 @@ int esc_mods_iommu_dma_unmap_memory(struct mods_client               *client,
 	LOG_ENT();
 
 	p_mem_info = get_mem_handle(client, p->memory_handle);
-	if (unlikely(!p_mem_info))
+	if (unlikely(!p_mem_info || p_mem_info->shared))
 		goto failed;
 
 	if (!list_is_singular(&p_mem_info->dma_map_list)) {
@@ -2655,13 +2724,90 @@ int esc_mods_reserve_allocation(struct mods_client             *client,
 			 p_mem_info, (unsigned long long)p_mem_info->reservation_tag);
 		goto failed;
 	}
+	WARN_ON(p_mem_info->shared);
 
 	if (unlikely(!list_empty(&p_mem_info->dma_map_list) || sg_dma_address(p_mem_info->sg))) {
 		cl_error("handle %p has dma mappings and cannot be reserved\n", p_mem_info);
 		goto failed;
 	}
 
+	if (unlikely(p_mem_info->dma_pages || p_mem_info->decrypted_mmap)) {
+		cl_error("handle %p is incompatible with reservations\n", p_mem_info);
+		goto failed;
+	}
+
 	p_mem_info->reservation_tag = p->tag;
+
+	err = 0;
+
+failed:
+	mutex_unlock(&client->mtx);
+
+	LOG_EXT();
+	return err;
+}
+
+int esc_mods_share_allocation(struct mods_client             *client,
+			      struct MODS_RESERVE_ALLOCATION *p)
+{
+	struct MODS_MEM_INFO *p_mem_info;
+	int                   err = -EINVAL;
+
+	LOG_ENT();
+
+	if (!p->tag) {
+		cl_error("invalid tag 0x%llx for memory reservations\n",
+			 (unsigned long long)p->tag);
+		LOG_EXT();
+		return -EINVAL;
+	}
+
+	err = mutex_lock_interruptible(&client->mtx);
+	if (unlikely(err)) {
+		LOG_EXT();
+		return err;
+	}
+
+	err = -EINVAL;
+
+	p_mem_info = get_mem_handle(client, p->memory_handle);
+	if (unlikely(!p_mem_info)) {
+		cl_error("failed to get memory handle\n");
+		goto failed;
+	}
+
+	if (unlikely(!validate_mem_handle(client, p_mem_info))) {
+		cl_error("invalid handle %p\n", p_mem_info);
+		goto failed;
+	}
+
+	if (unlikely(p_mem_info->reservation_tag)) {
+		cl_error("handle %p is already reserved with tag 0x%llx\n",
+			 p_mem_info, (unsigned long long)p_mem_info->reservation_tag);
+		goto failed;
+	}
+	WARN_ON(p_mem_info->shared);
+
+	if (unlikely(p_mem_info->dma_pages || p_mem_info->decrypted_mmap)) {
+		cl_error("handle %p is incompatible with reservations\n", p_mem_info);
+		goto failed;
+	}
+
+	if (unlikely(!p_mem_info->device_ro)) {
+		cl_error("handle %p can be mapped as device-writable and cannot be shared\n",
+			 p_mem_info);
+		goto failed;
+	}
+
+	list_del(&p_mem_info->list);
+
+	p_mem_info->reservation_tag = p->tag;
+	p_mem_info->shared = true;
+	p_mem_info->shared_client_mask |= get_client_mask(client);
+
+	mutex_lock(&mem_reservation_mtx);
+	add_to_reservations(client, p_mem_info);
+	mutex_unlock(&mem_reservation_mtx);
 
 	err = 0;
 
@@ -2689,8 +2835,15 @@ int esc_mods_get_reserved_allocation(struct mods_client             *client,
 		return -EINVAL;
 	}
 
+	err = mutex_lock_interruptible(&client->mtx);
+	if (unlikely(err)) {
+		LOG_EXT();
+		return err;
+	}
+
 	err = mutex_lock_interruptible(&mem_reservation_mtx);
 	if (unlikely(err)) {
+		mutex_unlock(&client->mtx);
 		LOG_EXT();
 		return err;
 	}
@@ -2699,36 +2852,49 @@ int esc_mods_get_reserved_allocation(struct mods_client             *client,
 		p_mem_info = list_entry(iter, struct MODS_MEM_INFO, list);
 
 		if (p_mem_info->reservation_tag == p->tag) {
-			list_del(&p_mem_info->list);
+			if (!p_mem_info->shared)
+				list_del(&p_mem_info->list);
 			break;
 		}
 
 		p_mem_info = NULL;
 	}
 
-	mutex_unlock(&mem_reservation_mtx);
-
 	if (unlikely(!p_mem_info)) {
+		mutex_unlock(&mem_reservation_mtx);
+		mutex_unlock(&client->mtx);
 		cl_error("no mem reservation for tag 0x%llx\n", (unsigned long long)p->tag);
 		LOG_EXT();
 		return -EINVAL;
 	}
 
-	/* Claim reservation and return handle */
-	err = register_alloc(client, p_mem_info);
-	if (unlikely(err)) {
-		mutex_lock(&mem_reservation_mtx);
-		list_add(&p_mem_info->list, &avail_mem_reservations);
-		mutex_unlock(&mem_reservation_mtx);
+	if (p_mem_info->shared) {
+		const u64 client_mask = get_client_mask(client);
+
+		if (p_mem_info->shared_client_mask & client_mask) {
+			mutex_unlock(&mem_reservation_mtx);
+			mutex_unlock(&client->mtx);
+			cl_error("shared tag 0x%llx is already claimed by this client\n",
+				 (unsigned long long)p->tag);
+			LOG_EXT();
+			return -EINVAL;
+		}
+
+		p_mem_info->shared_client_mask |= client_mask;
 	} else {
+		list_add(&p_mem_info->list, &client->mem_alloc_list);
+
 		atomic_inc(&client->num_allocs);
 		atomic_add((int)p_mem_info->num_pages, &client->num_pages);
-
-		p->memory_handle = (u64)(size_t)p_mem_info;
 	}
 
+	mutex_unlock(&mem_reservation_mtx);
+	mutex_unlock(&client->mtx);
+
+	p->memory_handle = (u64)(size_t)p_mem_info;
+
 	LOG_EXT();
-	return err;
+	return OK;
 }
 
 int esc_mods_release_reserved_allocation(struct mods_client             *client,
@@ -2763,7 +2929,7 @@ int esc_mods_release_reserved_allocation(struct mods_client             *client,
 			goto failed;
 		}
 
-		if (unlikely(!validate_mem_handle(client, p_mem_info))) {
+		if (unlikely(!p_mem_info->shared && !validate_mem_handle(client, p_mem_info))) {
 			cl_error("invalid handle %p\n", p_mem_info);
 			goto failed;
 		}
@@ -2773,8 +2939,37 @@ int esc_mods_release_reserved_allocation(struct mods_client             *client,
 				 p_mem_info, p_mem_info->reservation_tag, p->tag);
 			goto failed;
 		}
-	} else {
 
+		if (p_mem_info->shared) {
+			const u64 client_mask = get_client_mask(client);
+
+			err = mutex_lock_interruptible(&mem_reservation_mtx);
+			if (unlikely(err))
+				goto failed;
+
+			if (!(p_mem_info->shared_client_mask & client_mask)) {
+				mutex_unlock(&mem_reservation_mtx);
+				cl_error("invalid handle %p\n", p_mem_info);
+				goto failed;
+			}
+
+			if (p_mem_info->shared_client_mask & ~client_mask) {
+				mutex_unlock(&mem_reservation_mtx);
+				cl_error("shared handle %p is used by other clients\n", p_mem_info);
+				goto failed;
+			}
+
+			p_mem_info->shared = false;
+			p_mem_info->shared_client_mask = 0;
+			list_del(&p_mem_info->list);
+
+			mutex_unlock(&mem_reservation_mtx);
+
+			list_add(&p_mem_info->list, &client->mem_alloc_list);
+			atomic_inc(&client->num_allocs);
+			atomic_add((int)p_mem_info->num_pages, &client->num_pages);
+		}
+	} else {
 		list_for_each(iter, head) {
 			p_mem_info = list_entry(iter, struct MODS_MEM_INFO, list);
 
@@ -2787,6 +2982,8 @@ int esc_mods_release_reserved_allocation(struct mods_client             *client,
 		if (unlikely(!p_mem_info)) {
 			cl_error("no mem reservation for tag 0x%llx\n", (unsigned long long)p->tag);
 			goto failed;
+		} else {
+			WARN_ON(p_mem_info->shared);
 		}
 	}
 
@@ -2852,8 +3049,7 @@ int esc_mods_flush_cpu_cache_range(struct mods_client                *client,
 
 	LOG_ENT();
 
-	if (irqs_disabled() || in_interrupt() ||
-	    p->virt_addr_start > p->virt_addr_end) {
+	if (irqs_disabled() || in_interrupt() || p->virt_addr_start > p->virt_addr_end) {
 
 		cl_debug(DEBUG_MEM_DETAILED, "cannot flush cache\n");
 		LOG_EXT();
@@ -2872,6 +3068,13 @@ int esc_mods_flush_cpu_cache_range(struct mods_client                *client,
 		return err;
 	}
 
+	err = mutex_lock_interruptible(&mem_reservation_mtx);
+	if (unlikely(err)) {
+		mutex_unlock(&client->mtx);
+		LOG_EXT();
+		return err;
+	}
+
 	head = &client->mem_map_list;
 	err  = -EINVAL;
 
@@ -2881,10 +3084,8 @@ int esc_mods_flush_cpu_cache_range(struct mods_client                *client,
 
 		const u64 mapped_va   = p_map_mem->virtual_addr;
 		const u64 mapped_end  = mapped_va + p_map_mem->mapping_length;
-		const u64 flush_start = p->virt_addr_start < mapped_va ? mapped_va
-								       : p->virt_addr_start;
-		const u64 flush_end   = p->virt_addr_end > mapped_end ? mapped_end
-								      : p->virt_addr_end;
+		const u64 flush_start = p->virt_addr_start < mapped_va ? mapped_va : p->virt_addr_start;
+		const u64 flush_end   = p->virt_addr_end > mapped_end ? mapped_end : p->virt_addr_end;
 
 		if (flush_start >= flush_end)
 			continue;
@@ -2893,6 +3094,7 @@ int esc_mods_flush_cpu_cache_range(struct mods_client                *client,
 		err = OK;
 	}
 
+	mutex_unlock(&mem_reservation_mtx);
 	mutex_unlock(&client->mtx);
 
 	if (err)

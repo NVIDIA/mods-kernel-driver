@@ -64,10 +64,6 @@
 #       define MODS_HAS_DEV_PROPS 1
 #endif
 
-#if defined(CONFIG_PPC64) && KERNEL_VERSION(4, 5, 0) <= MODS_KERNEL_VERSION
-#       define MODS_HAS_PNV_PCI_GET_NPU_DEV 1
-#endif
-
 #if KERNEL_VERSION(4, 12, 0) <= MODS_KERNEL_VERSION && \
 	KERNEL_VERSION(4, 13, 0) > MODS_KERNEL_VERSION && \
 	defined(CONFIG_X86)

@@ -248,30 +248,6 @@ int esc_mods_pci_get_bar_info_2(struct mods_client             *client,
 		 p->pci_device.function,
 		 p->bar_index);
 
-#if defined(CONFIG_PPC64)
-	if (unlikely(mutex_lock_interruptible(mods_get_irq_mutex()))) {
-		pci_dev_put(dev);
-		LOG_EXT();
-		return -EINTR;
-	}
-
-	/* Enable device on the PCI bus */
-	err = mods_enable_device(client, dev, NULL);
-	if (err) {
-		cl_error("unable to enable dev %04x:%02x:%02x.%x\n",
-			 p->pci_device.domain,
-			 p->pci_device.bus,
-			 p->pci_device.device,
-			 p->pci_device.function);
-		mutex_unlock(mods_get_irq_mutex());
-		pci_dev_put(dev);
-		LOG_EXT();
-		return err;
-	}
-
-	mutex_unlock(mods_get_irq_mutex());
-#endif
-
 	bar_resource_offset = 0;
 	for (i = 0; i < p->bar_index; i++) {
 #if defined(MODS_HAS_IORESOURCE_MEM_64)
@@ -960,11 +936,6 @@ int esc_mods_pci_set_dma_mask(struct mods_client       *client,
 			dma_mask->pci_device.bus,
 			dma_mask->pci_device.device,
 			dma_mask->pci_device.function);
-#if defined(CONFIG_PPC64)
-		/* Ignore error if TCE bypass is on */
-		if (dev->dma_mask == ~0ULL)
-			err = OK;
-#endif
 	} else {
 #if defined(MODS_HAS_SET_COHERENT_MASK)
 		err = dma_set_coherent_mask(&dev->dev, mask);

@@ -26,7 +26,6 @@ mods-$(CONFIG_PCI)               += mods_pci.o
 mods-$(CONFIG_ACPI)              += mods_acpi.o
 mods-$(HAVE_ARM_FFA)             += mods_arm_ffa.o
 mods-$(CONFIG_DEBUG_FS)          += mods_debugfs.o
-mods-$(CONFIG_PPC64)             += mods_ppc64.o
 mods-$(CONFIG_TEGRA_IVC)         += mods_bpmpipc.o
 
 # Otherwise we were called directly from the command
