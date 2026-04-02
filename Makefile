@@ -27,6 +27,7 @@ mods-$(CONFIG_ACPI)              += mods_acpi.o
 mods-$(HAVE_ARM_FFA)             += mods_arm_ffa.o
 mods-$(CONFIG_DEBUG_FS)          += mods_debugfs.o
 mods-$(CONFIG_TEGRA_IVC)         += mods_bpmpipc.o
+mods-$(CONFIG_HAVE_ARM_SMCCC)    += mods_arm_smccc.o
 
 # Otherwise we were called directly from the command
 # line; invoke the kernel build system.

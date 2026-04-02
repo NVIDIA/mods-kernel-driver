@@ -109,6 +109,10 @@
 #       define MODS_HAS_FB_SET_SUSPEND 1
 #endif
 
+#if KERNEL_VERSION(5, 4, 184) <= MODS_KERNEL_VERSION && defined(CONFIG_HAVE_ARM_SMCCC)
+#       define MODS_HAS_ARM_SMCCC 1
+#endif
+
 #ifndef IS_BUILTIN
 #   define IS_BUILTIN(c) 0
 #endif

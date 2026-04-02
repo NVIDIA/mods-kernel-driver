@@ -393,56 +393,109 @@ static int dma_map_to_default_dev(struct mods_client   *client,
 static void clear_contiguous_cache(struct mods_client *client,
 				   u64                 virt_start,
 				   u32                 size);
+
+static int setup_cache_attr_per_page(struct mods_client   *client,
+				     struct MODS_MEM_INFO *p_mem_info,
+				     u32                   i_chunk)
+{
+	cl_error("highmem is not supported on ARM64\n");
+	return -EINVAL;
+}
+#else
+static int setup_cache_attr_per_page(struct mods_client   *client,
+				     struct MODS_MEM_INFO *p_mem_info,
+				     u32                   ichunk)
+{
+	struct scatterlist *sg  = &p_mem_info->alloc_sg[ichunk];
+	unsigned int        offs;
+
+	for (offs = 0; offs < sg->length; offs += PAGE_SIZE) {
+		void *const ptr = MODS_KMAP(sg_page(sg) + (offs >> PAGE_SHIFT));
+		int         err;
+
+		if (unlikely(!ptr)) {
+			cl_error("kmap failed\n");
+			return -ENOMEM;
+		}
+
+		if (p_mem_info->cache_type == MODS_ALLOC_WRITECOMBINE)
+			err = MODS_SET_MEMORY_WC((unsigned long)ptr, 1);
+		else
+			err = MODS_SET_MEMORY_UC((unsigned long)ptr, 1);
+
+		MODS_KUNMAP(ptr);
+		if (unlikely(err)) {
+			cl_error("set cache type failed\n");
+			return err;
+		}
+
+		/* Set this flag early, so that when an error occurs,
+		 * release_chunks() will restore cache attributes
+		 * for all pages.  It's OK to restore cache attributes
+		 * even for chunks where we haven't change them.
+		 */
+		mark_chunk_wc(p_mem_info, ichunk);
+
+		/* Avoid superficial lockups */
+		cond_resched();
+	}
+
+	return 0;
+}
 #endif
 
 static int setup_cache_attr(struct mods_client   *client,
 			    struct MODS_MEM_INFO *p_mem_info,
 			    u32                   ichunk)
 {
-	const bool need_wc = p_mem_info->cache_type != MODS_ALLOC_CACHED;
-	int        err = 0;
+	struct scatterlist *sg;
+	void               *ptr;
+	int                 err = 0;
 
-	if (need_wc && !is_chunk_wc(p_mem_info, ichunk)) {
-		struct scatterlist *sg = &p_mem_info->alloc_sg[ichunk];
-		unsigned int        offs;
+	if (p_mem_info->cache_type == MODS_ALLOC_CACHED || is_chunk_wc(p_mem_info, ichunk))
+		return 0;
 
-		for (offs = 0; offs < sg->length; offs += PAGE_SIZE) {
-			void *ptr;
+	sg = &p_mem_info->alloc_sg[ichunk];
 
-			ptr = MODS_KMAP(sg_page(sg) + (offs >> PAGE_SHIFT));
-			if (unlikely(!ptr)) {
-				cl_error("kmap failed\n");
-				return -ENOMEM;
-			}
-#ifdef CONFIG_ARM64
-			clear_contiguous_cache(client,
-					       (u64)(size_t)ptr,
-					       PAGE_SIZE);
-#else
-			if (p_mem_info->cache_type == MODS_ALLOC_WRITECOMBINE)
-				err = MODS_SET_MEMORY_WC((unsigned long)ptr, 1);
-			else
-				err = MODS_SET_MEMORY_UC((unsigned long)ptr, 1);
-#endif
-			MODS_KUNMAP(ptr);
-			if (unlikely(err)) {
-				cl_error("set cache type failed\n");
-				return err;
-			}
+	/* For highmem pages, we need to map and process one page at a time,
+	 * because the kernel addresses from kmap() for those pages are non-contiguous.
+	 */
+	if (unlikely(PageHighMem(sg_page(sg))))
+		return setup_cache_attr_per_page(client, p_mem_info, ichunk);
 
-			/* Set this flag early, so that when an error occurs,
-			 * release_chunks() will restore cache attributes
-			 * for all pages.  It's OK to restore cache attributes
-			 * even for chunks where we haven't change them.
-			 */
-			mark_chunk_wc(p_mem_info, ichunk);
+	/* Typical fast path for modern CPUs, we assume all pages in the
+	 * chunk are accessible in contiguous manner.
+	 */
+	ptr = MODS_KMAP(sg_page(sg));
 
-			/* Avoid superficial lockups */
-			cond_resched();
-		}
+	if (unlikely(!ptr)) {
+		cl_error("kmap failed\n");
+		return -ENOMEM;
 	}
 
-	return err;
+#ifdef CONFIG_ARM64
+	clear_contiguous_cache(client,
+				(u64)(size_t)ptr,
+				sg->length);
+#else
+	if (p_mem_info->cache_type == MODS_ALLOC_WRITECOMBINE)
+		err = MODS_SET_MEMORY_WC((unsigned long)ptr, sg->length >> PAGE_SHIFT);
+	else
+		err = MODS_SET_MEMORY_UC((unsigned long)ptr, sg->length >> PAGE_SHIFT);
+#endif
+
+	MODS_KUNMAP(ptr);
+	if (unlikely(err)) {
+		cl_error("set cache type failed\n");
+		return err;
+	}
+
+	mark_chunk_wc(p_mem_info, ichunk);
+
+	/* Avoid superficial lockups */
+	cond_resched();
+
+	return 0;
 }
 
 /* Find the dma mapping chunk for the specified memory. */
@@ -541,16 +594,36 @@ static void save_non_wb_chunks(struct mods_client   *client,
 
 static int restore_cache_one_chunk(struct page *p_page, u8 order)
 {
-	int final_err = 0;
-	u32 num_pages = 1U << order;
-	u32 i;
+	const u32 num_pages = 1U << order;
+	int       final_err = 0;
 
-	for (i = 0; i < num_pages; i++) {
-		void *ptr = MODS_KMAP(p_page + i);
+	if (unlikely(PageHighMem(p_page))) {
+		u32 i;
+
+		for (i = 0; i < num_pages; i++) {
+			void *ptr = MODS_KMAP(p_page + i);
+			int   err = -ENOMEM;
+
+			if (likely(ptr))
+				err = MODS_SET_MEMORY_WB((unsigned long)ptr, 1);
+
+			MODS_KUNMAP(ptr);
+
+			if (likely(!final_err))
+				final_err = err;
+
+			/* Avoid superficial lockups */
+			cond_resched();
+		}
+	} else {
+		/* Typical fast path for modern CPUs, we assume all pages in the
+		 * chunk are accessible in contiguous manner.
+		 */
+		void *ptr = MODS_KMAP(p_page);
 		int   err = -ENOMEM;
 
 		if (likely(ptr))
-			err = MODS_SET_MEMORY_WB((unsigned long)ptr, 1);
+			err = MODS_SET_MEMORY_WB((unsigned long)ptr, num_pages);
 
 		MODS_KUNMAP(ptr);
 
@@ -587,8 +660,7 @@ static int release_free_chunks(struct mods_client *client)
 
 		list_del(iter);
 
-		err = restore_cache_one_chunk(free_chunk->p_page,
-					      free_chunk->order);
+		err = restore_cache_one_chunk(free_chunk->p_page, free_chunk->order);
 		if (likely(!final_err))
 			final_err = err;
 
@@ -629,13 +701,18 @@ static int restore_cache(struct mods_client   *client,
 
 	for_each_sg(p_mem_info->alloc_sg, sg, p_mem_info->num_chunks, i) {
 
-		const u32 order = get_order(sg->length);
-		int       err;
+		u32 order;
+		int err;
 
-		WARN_ON((PAGE_SIZE << order) != sg->length);
+		if (!sg)
+			break;
 
 		if (!sg_page(sg) || !is_chunk_wc(p_mem_info, i))
 			continue;
+
+		order = get_order(sg->length);
+
+		WARN_ON((PAGE_SIZE << order) != sg->length);
 
 		err = restore_cache_one_chunk(sg_page(sg), order);
 		if (likely(!final_err))
@@ -1239,7 +1316,7 @@ struct MODS_MEM_INFO *mods_find_alloc(struct mods_client *client, u64 phys_addr)
 {
 	struct list_head     *plist_head = &client->mem_alloc_list;
 	struct list_head     *plist_iter;
-	struct MODS_MEM_INFO *p_mem_info;
+	struct MODS_MEM_INFO *p_mem_info = NULL;
 
 	list_for_each(plist_iter, plist_head) {
 		u64 offset;
@@ -1363,7 +1440,7 @@ static struct MODS_MEM_INFO *alloc_mem_info(struct mods_client *client,
 	return p_mem_info;
 }
 
-/* For large non-contiguous allocations, we typically use significantly less
+/* For large non-contiguous allocations, we typically use significantly fewer
  * chunks than originally estimated.  This function reallocates the
  * MODS_MEM_INFO struct so that it uses only as much memory as it needs.
  */
@@ -1381,8 +1458,12 @@ static struct MODS_MEM_INFO *optimize_chunks(struct mods_client   *client,
 			break;
 	}
 
-	if (num_chunks < p_mem_info->num_chunks)
+	if (num_chunks < p_mem_info->num_chunks) {
 		p_new_mem_info = alloc_mem_info(client, num_chunks, p_mem_info->cache_type, &alloc_size);
+
+		if (!p_new_mem_info)
+			p_mem_info->num_chunks = num_chunks;
+	}
 
 	if (p_new_mem_info) {
 		const size_t copy_size =

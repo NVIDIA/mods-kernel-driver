@@ -62,7 +62,6 @@ int mods_enable_device(struct mods_client   *client,
 		return -EINVAL;
 	}
 
-
 	/* Client already owns the device */
 	if (dpriv->client_id == client->client_id) {
 		if (dev_entry)
@@ -92,6 +91,24 @@ int mods_enable_device(struct mods_client   *client,
 		return err;
 	}
 
+#if defined(MODS_HAS_ARM_SMCCC)
+	if (dpriv->qual_mode != MODS_QUAL_MODE_DISABLED) {
+		cl_info("enabling qual mode %u on dev %04x:%02x:%02x.%x\n",
+			dpriv->qual_mode,
+			pci_domain_nr(dev->bus),
+			dev->bus->number,
+			PCI_SLOT(dev->devfn),
+			PCI_FUNC(dev->devfn));
+
+		err = mods_qdev_enable(dev, dpriv->qual_mode, &dpriv->qual_dev);
+		if (unlikely(err)) {
+			cl_error("failed to enable qual mode\n");
+			pci_disable_device(dev);
+			return err;
+		}
+	}
+#endif
+
 	cl_info("enabled dev %04x:%02x:%02x.%x\n",
 		pci_domain_nr(dev->bus),
 		dev->bus->number,
@@ -117,6 +134,19 @@ void mods_disable_device(struct mods_client *client,
 	struct en_dev_entry *dpriv = pci_get_drvdata(dev);
 
 	WARN_ON(!mutex_is_locked(&irq_mtx));
+
+#if defined(MODS_HAS_ARM_SMCCC)
+	if (dpriv->qual_mode != MODS_QUAL_MODE_DISABLED) {
+		cl_info("disabling qual mode on dev %04x:%02x:%02x.%x\n",
+			pci_domain_nr(dev->bus),
+			dev->bus->number,
+			PCI_SLOT(dev->devfn),
+			PCI_FUNC(dev->devfn));
+
+		mods_qdev_disable(dpriv->qual_dev);
+		dpriv->qual_dev = NULL;
+	}
+#endif
 
 	pci_disable_device(dev);
 

@@ -103,6 +103,33 @@ static int mods_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 		return -ENOMEM;
 
 	dpriv->dev = pci_dev_get(dev);
+
+#if defined(MODS_HAS_ARM_SMCCC)
+	{
+		int err = 0;
+		int qm = mods_get_force_qual_mode();
+
+		if (qm) {
+			qm &= (MODS_QUAL_MODE_LINK_IDE | MODS_QUAL_MODE_C2C | MODS_QUAL_MODE_SEL_IDE);
+
+			mods_info_printk("enabling qual mode %u on dev %04x:%02x:%02x.%x\n",
+				qm,
+				pci_domain_nr(dev->bus),
+				dev->bus->number,
+				PCI_SLOT(dev->devfn),
+				PCI_FUNC(dev->devfn));
+
+			err = mods_qdev_enable(dev, qm, &dpriv->qual_dev);
+			if (unlikely(err)) {
+				mods_error_printk("failed to enable qual mode\n");
+				pci_dev_put(dev);
+				kfree(dpriv);
+				return err;
+			}
+		}
+	}
+#endif
+
 	init_completion(&dpriv->client_completion);
 	pci_set_drvdata(dev, dpriv);
 
@@ -139,6 +166,19 @@ static void mods_pci_remove(struct pci_dev *dev)
 		mutex_unlock(mods_get_irq_mutex());
 		wait_for_completion(&dpriv->client_completion);
 	}
+
+#if defined(MODS_HAS_ARM_SMCCC)
+	if (dpriv->qual_dev) {
+		mods_info_printk("disabling qual mode on dev %04x:%02x:%02x.%x\n",
+			pci_domain_nr(dev->bus),
+			dev->bus->number,
+			PCI_SLOT(dev->devfn),
+			PCI_FUNC(dev->devfn));
+
+		mods_qdev_disable(dpriv->qual_dev);
+		dpriv->qual_dev = NULL;
+	}
+#endif
 
 	pci_dev_put(dpriv->dev);
 	pci_set_drvdata(dev, NULL);
@@ -185,6 +225,7 @@ static struct pci_driver mods_pci_driver = {
 static int debug;
 static int multi_instance = MODS_MULTI_INSTANCE_DEFAULT_VALUE;
 static u32 access_token   = MODS_ACCESS_TOKEN_NONE;
+static int force_qual_mode;
 
 #if defined(CONFIG_PCI) && defined(MODS_HAS_SRIOV)
 static int mods_pci_sriov_configure(struct pci_dev *dev, int numvfs)
@@ -409,6 +450,16 @@ int mods_get_multi_instance(void)
 	return multi_instance > 0;
 }
 
+void mods_set_force_qual_mode(int qm)
+{
+	force_qual_mode = qm;
+}
+
+int mods_get_force_qual_mode(void)
+{
+	return force_qual_mode;
+}
+
 /*********************
  * CLIENT MANAGEMENT *
  *********************/
@@ -426,7 +477,7 @@ static struct mods_client *alloc_client(void)
 		max_clients = MODS_MAX_CLIENTS;
 
 	for (idx = 1; idx <= max_clients; idx++) {
-		if (!test_and_set_bit(idx - 1U, &mp.client_flags)) {
+		if (!test_and_set_bit(idx - 1U, mp.client_flags)) {
 			struct mods_client *client = mods_client_from_id(idx);
 
 			memset(client, 0, sizeof(*client));
@@ -435,8 +486,8 @@ static struct mods_client *alloc_client(void)
 			atomic_set(&client->last_bad_dbdf, -1);
 
 			cl_debug(DEBUG_IOCTL,
-				 "open client (bit mask 0x%lx)\n",
-				 mp.client_flags);
+				 "open client %u\n",
+				 idx);
 
 			mutex_init(&client->mtx);
 			spin_lock_init(&client->irq_lock);
@@ -465,7 +516,7 @@ static void free_client(u8 client_id)
 	memset(client, 0, sizeof(*client));
 
 	/* Indicate the client_id is free */
-	clear_bit((unsigned int)client_id - 1U, &mp.client_flags);
+	clear_bit((unsigned int)client_id - 1U, mp.client_flags);
 
 	cl_debug(DEBUG_IOCTL, "closed client\n");
 	LOG_EXT();
@@ -478,7 +529,7 @@ struct mods_client *mods_client_from_id(u8 client_id)
 
 int mods_is_client_enabled(u8 client_id)
 {
-	return test_bit(client_id - 1, &mp.client_flags);
+	return test_bit(client_id - 1, mp.client_flags);
 }
 
 u32 mods_get_access_token(void)
@@ -604,7 +655,7 @@ static void __exit mods_exit_module(void)
 	mods_remove_debugfs();
 
 	for (i = 0; i < MODS_MAX_CLIENTS; i++) {
-		if (mp.client_flags & (1U << i))
+		if (test_bit(i, mp.client_flags))
 			free_client(i + 1);
 	}
 
@@ -654,6 +705,11 @@ MODULE_PARM_DESC(debug,
 module_param(multi_instance, int, 0644);
 MODULE_PARM_DESC(multi_instance,
 	"allows more than one client to simultaneously open the driver");
+
+#if defined(MODS_HAS_ARM_SMCCC)
+module_param(force_qual_mode, int, 0644);
+MODULE_PARM_DESC(force_qual_mode, "enable qual mode during driver probing");
+#endif
 
 /********************
  * HELPER FUNCTIONS *
@@ -2831,6 +2887,12 @@ static long mods_krnl_ioctl(struct file  *fp,
 		MODS_IOCTL(MODS_ESC_BPMP_UPHY_LANE_EOM_SCAN,
 			   esc_mods_bpmp_uphy_lane_eom_scan,
 			   MODS_BPMP_UPHY_LANE_EOM_SCAN_PARAMS);
+		break;
+#endif
+
+#if defined(MODS_HAS_ARM_SMCCC)
+	case MODS_ESC_SET_QUAL_MODE:
+		MODS_IOCTL(MODS_ESC_SET_QUAL_MODE, esc_mods_set_qual_mode, MODS_SET_QUAL_MODE);
 		break;
 #endif
 

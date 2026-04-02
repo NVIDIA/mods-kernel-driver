@@ -48,6 +48,9 @@ struct en_dev_entry {
 	struct list_head     list;
 	struct pci_dev      *dev;
 	struct msix_entry   *msix_entries;
+#if defined(MODS_HAS_ARM_SMCCC)
+	void                *qual_dev;
+#endif
 	struct completion    client_completion;
 	u32                  irq_flags;
 	u32                  nvecs;
@@ -55,6 +58,9 @@ struct en_dev_entry {
 	u32                  num_vfs;
 #endif
 	u8                   client_id;
+#if defined(MODS_HAS_ARM_SMCCC)
+	u8                   qual_mode;
+#endif
 };
 
 struct mem_type {
@@ -203,9 +209,12 @@ int mods_get_multi_instance(void);
 void mods_set_multi_instance(int mi);
 u32 mods_get_access_token(void);
 
+void mods_set_force_qual_mode(int qm);
+int mods_get_force_qual_mode(void);
+
 #define IRQ_MAX			(256+PCI_IRQ_MAX)
 #define PCI_IRQ_MAX		15
-#define MODS_MAX_CLIENTS	32
+#define MODS_MAX_CLIENTS	128
 
 #define IRQ_VAL_POISON		0xfafbfcfdU
 
@@ -287,7 +296,7 @@ struct dev_irq_map {
 
 struct mods_priv {
 	/* Bitmap for each allocated client id. */
-	unsigned long      client_flags;
+	DECLARE_BITMAP(client_flags, MODS_MAX_CLIENTS);
 
 	/* Client structures */
 	struct mods_client clients[MODS_MAX_CLIENTS];
@@ -701,6 +710,13 @@ void mods_bpmpipc_cleanup(void);
 #if defined(MODS_HAS_ARM_FFA)
 int mods_ffa_abi_register(void);
 void mods_ffa_abi_unregister(void);
+#endif
+
+#if defined(MODS_HAS_ARM_SMCCC)
+int esc_mods_set_qual_mode(struct mods_client *client, struct MODS_SET_QUAL_MODE *p);
+
+int mods_qdev_enable(struct pci_dev *epdev, u8 qual_mode, void **p_qdev);
+void mods_qdev_disable(void *qdev);
 #endif
 
 #endif	/* _MODS_INTERNAL_H_  */
