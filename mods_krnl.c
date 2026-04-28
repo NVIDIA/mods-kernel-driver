@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* SPDX-FileCopyrightText: Copyright (c) 2008-2025, NVIDIA CORPORATION.  All rights reserved. */
+/* SPDX-FileCopyrightText: Copyright (c) 2008-2026, NVIDIA CORPORATION.  All rights reserved. */
 
 #include "mods_internal.h"
 
@@ -513,12 +513,13 @@ static void free_client(u8 client_id)
 
 	LOG_ENT();
 
+	cl_debug(DEBUG_IOCTL, "closed client\n");
+
 	memset(client, 0, sizeof(*client));
 
 	/* Indicate the client_id is free */
 	clear_bit((unsigned int)client_id - 1U, mp.client_flags);
 
-	cl_debug(DEBUG_IOCTL, "closed client\n");
 	LOG_EXT();
 }
 
@@ -529,6 +530,8 @@ struct mods_client *mods_client_from_id(u8 client_id)
 
 int mods_is_client_enabled(u8 client_id)
 {
+	if (client_id < 1 || client_id > MODS_MAX_CLIENTS)
+		return false;
 	return test_bit(client_id - 1, mp.client_flags);
 }
 
@@ -579,12 +582,31 @@ static int mods_check_access_token(struct mods_client *client)
 	return OK;
 }
 
+#if defined(MODS_HAS_ARM_FFA)
+static bool ffa_registered;
+#endif
+
 /******************************
  * INIT/EXIT MODULE FUNCTIONS *
  ******************************/
 static int __init mods_init_module(void)
 {
-	int rc;
+	int  err;
+	bool misc_ok = false;
+#if defined(CONFIG_PCI)
+	bool pci_ok = false;
+#endif
+#if defined(MODS_HAS_TEGRA) && defined(CONFIG_COMMON_CLK)
+	bool clocks_ok = false;
+#endif
+	bool dbgfs_ok = false;
+	bool dmabuf_ok = false;
+#if defined(MODS_HAS_TEGRA)
+	bool smmu_ok = false;
+#if defined(CONFIG_DMA_ENGINE)
+	bool dma_eng_ok = false;
+#endif
+#endif
 
 	LOG_ENT();
 
@@ -592,44 +614,54 @@ static int __init mods_init_module(void)
 
 	mods_init_irq();
 
-	rc = misc_register(&mods_dev);
-	if (rc < 0)
-		return -EBUSY;
+	err = misc_register(&mods_dev);
+	if (err < 0)
+		goto error;
+	misc_ok = true;
 
 #if defined(CONFIG_PCI)
-	rc = pci_register_driver(&mods_pci_driver);
-	if (rc < 0)
-		return -EBUSY;
+	err = pci_register_driver(&mods_pci_driver);
+	if (err < 0)
+		goto error;
+	pci_ok = true;
 #endif
 
 #if defined(MODS_HAS_TEGRA) && defined(CONFIG_COMMON_CLK)
 	mods_init_clock_api();
+	clocks_ok = true;
 #endif
 
-	rc = mods_create_debugfs(&mods_dev);
-	if (rc < 0)
-		return rc;
+	err = mods_create_debugfs(&mods_dev);
+	if (err < 0)
+		goto error;
+	dbgfs_ok = true;
 
-	rc = mods_init_dmabuf();
-	if (rc < 0)
-		return rc;
+	err = mods_init_dmabuf();
+	if (err < 0)
+		goto error;
+	dmabuf_ok = true;
 
 #if defined(MODS_HAS_TEGRA)
-	rc = smmu_driver_init();
-	if (rc < 0)
-		return rc;
+	err = smmu_driver_init();
+	if (err < 0)
+		goto error;
+	smmu_ok = true;
 
 #if defined(CONFIG_DMA_ENGINE)
-	rc = mods_init_dma();
-	if (rc < 0)
-		return rc;
+	err = mods_init_dma();
+	if (err < 0)
+		goto error;
+	dma_eng_ok = true;
 #endif
 #endif
 
 #if defined(MODS_HAS_ARM_FFA)
-	rc = mods_ffa_abi_register();
-	if (rc < 0)
-		mods_warning_printk("error on mods_ffa_abi_register returned %d\n", rc);
+	err = mods_ffa_abi_register();
+	if (err < 0) {
+		mods_warning_printk("error on mods_ffa_abi_register returned %d\n", err);
+		err = 0;
+	} else
+		ffa_registered = true;
 #endif
 
 	mods_info_printk("*** WARNING: DIAGNOSTIC DRIVER LOADED ***\n");
@@ -641,7 +673,40 @@ static int __init mods_init_module(void)
 		mods_info_printk("debug level 0x%x\n", debug);
 
 	LOG_EXT();
-	return OK;
+	return 0;
+
+error:
+#if defined(MODS_HAS_ARM_FFA)
+	if (ffa_registered) {
+		mods_ffa_abi_unregister();
+		ffa_registered = false;
+	}
+#endif
+#if defined(MODS_HAS_TEGRA)
+#if defined(CONFIG_DMA_ENGINE)
+	if (dma_eng_ok)
+		mods_exit_dma();
+#endif
+	if (smmu_ok)
+		smmu_driver_exit();
+#endif
+	if (dmabuf_ok)
+		mods_exit_dmabuf();
+	if (dbgfs_ok)
+		mods_remove_debugfs();
+#if defined(MODS_HAS_TEGRA) && defined(CONFIG_COMMON_CLK)
+	if (clocks_ok)
+		mods_shutdown_clock_api();
+#endif
+#if defined(CONFIG_PCI)
+	if (pci_ok)
+		pci_unregister_driver(&mods_pci_driver);
+#endif
+	if (misc_ok)
+		misc_deregister(&mods_dev);
+
+	LOG_EXT();
+	return err;
 }
 
 static void __exit mods_exit_module(void)
@@ -650,14 +715,17 @@ static void __exit mods_exit_module(void)
 
 	LOG_ENT();
 
-	mods_exit_dmabuf();
-
-	mods_remove_debugfs();
-
 	for (i = 0; i < MODS_MAX_CLIENTS; i++) {
 		if (test_bit(i, mp.client_flags))
 			free_client(i + 1);
 	}
+
+#if defined(MODS_HAS_ARM_FFA)
+	if (ffa_registered) {
+		mods_ffa_abi_unregister();
+		ffa_registered = false;
+	}
+#endif
 
 #if defined(MODS_HAS_TEGRA)
 #if defined(CONFIG_DMA_ENGINE)
@@ -666,19 +734,20 @@ static void __exit mods_exit_module(void)
 	smmu_driver_exit();
 #endif
 
+	mods_exit_dmabuf();
+
+	mods_remove_debugfs();
+
+#if defined(MODS_HAS_TEGRA) && defined(CONFIG_COMMON_CLK)
+	mods_shutdown_clock_api();
+#endif
+
 #if defined(CONFIG_PCI)
 	pci_unregister_driver(&mods_pci_driver);
 #endif
 
 	misc_deregister(&mods_dev);
 
-#if defined(MODS_HAS_TEGRA) && defined(CONFIG_COMMON_CLK)
-	mods_shutdown_clock_api();
-#endif
-
-#if defined(MODS_HAS_ARM_FFA)
-	mods_ffa_abi_unregister();
-#endif
 	mods_free_mem_reservations();
 	mods_info_printk("driver unloaded\n");
 	LOG_EXT();

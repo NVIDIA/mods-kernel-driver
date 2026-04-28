@@ -45,6 +45,7 @@ static int acpi_store_dev_children(struct mods_client *client,
 	acpi_out_data->children[acpi_out_data->num_children] = curr_acpi_id;
 	++acpi_out_data->num_children;
 
+	/* Continue iterating */
 	return OK;
 }
 
@@ -54,20 +55,19 @@ static int acpi_compare_dev_id(struct mods_client *client,
 			       void               *out_data)
 {
 	u32                               i;
-	struct acpi_dev_children_in_data *dev_child_data
-			= (struct acpi_dev_children_in_data *)out_data;
+	struct acpi_dev_children_in_data *dev_child_data = (struct acpi_dev_children_in_data *)out_data;
 
 	for (i = 0; i < dev_child_data->num_expected_acpi_ids; ++i) {
 		if ((dev_child_data->expected_acpi_ids_buf[i] & dev_child_data->acpi_dev_mask)
 			== (curr_acpi_id & dev_child_data->acpi_dev_mask)) {
 			dev_child_data->dev_handle = dev_handle;
-			/*
-			 * returning unique error code to signal caller that value is found
-			 */
+			/* Return unique error code to signal caller that value is found */
 			return -EALREADY;
 		}
 	}
-	return -ENODEV;
+
+	/* Continue iterating */
+	return OK;
 }
 
 struct acpi_dev_check_context {
@@ -80,21 +80,19 @@ static int acpi_dev_check_one(struct device *dev, void *data)
 {
 	struct acpi_dev_check_context *adwc      = data;
 	struct acpi_device            *adev      = to_acpi_device(dev);
-	int                            err       = OK;
 	unsigned long long             device_id = 0;
 	acpi_status                    status;
 
 	if (!adev)
-		/* No ACPI device corresponding to this device */
+		/* No ACPI device corresponding to this device, continue iterating */
 		return OK;
 
 	status = acpi_evaluate_integer(adev->handle, "_ADR", NULL, &device_id);
 	if (ACPI_FAILURE(status))
-		/* Couldnt query device_id for this device */
+		/* Couldn't query device_id for this device, continue iterating */
 		return OK;
 
-	err = adwc->fptr(adwc->client, device_id, adev->handle, adwc->out_data);
-	return ((err == -EALREADY) ? OK : err);
+	return adwc->fptr(adwc->client, device_id, adev->handle, adwc->out_data);
 }
 
 static int acpi_get_dev_children(struct mods_client *client,
@@ -120,13 +118,15 @@ static int acpi_get_dev_children(struct mods_client *client,
 #endif
 	if (unlikely(err))
 		cl_error("ACPI: device for fetching device children not found\n");
-	else
+	else {
 		err = device_for_each_child(&device->dev, &adcc, acpi_dev_check_one);
+		if (err == -EALREADY)
+			err = OK;
+	}
 
 	LOG_EXT();
 	return err;
 }
-
 
 /* store handle if found. */
 static void mods_acpi_handle_init(struct mods_client *client,
@@ -246,12 +246,14 @@ static int mods_extract_acpi_object(struct mods_client *client,
 		break;
 
 	case ACPI_TYPE_LOCAL_REFERENCE:
-		if (obj->reference.actual_type == ACPI_TYPE_POWER) {
-			memcpy(*buf, &obj->reference.handle,
-					sizeof(obj->reference.handle));
+		if (obj->reference.actual_type != ACPI_TYPE_POWER) {
+			cl_error("unsupported ACPI reference type %u\n", obj->reference.actual_type);
+			err = -EINVAL;
+		} else if (buf_end - *buf >= sizeof(obj->reference.handle)) {
+			memcpy(*buf, &obj->reference.handle, sizeof(obj->reference.handle));
 			*buf += sizeof(obj->reference.handle);
 		} else {
-			cl_error("Unsupported ACPI reference type\n");
+			cl_error("output buffer too small for ACPI method %s\n", method);
 			err = -EINVAL;
 		}
 		break;
@@ -542,8 +544,10 @@ static int mods_acpi_get_ddc(struct mods_client         *client,
 					      &output);
 		if (ACPI_SUCCESS(status)) {
 			ddc = output.pointer;
-			if (ddc && (ddc->type != ACPI_TYPE_BUFFER))
+			if (ddc && (ddc->type != ACPI_TYPE_BUFFER)) {
+				kfree(ddc);
 				continue;
+			}
 
 			if (!ddc || ddc->buffer.length == 0) {
 				cl_error("unsupported ACPI output type\n");

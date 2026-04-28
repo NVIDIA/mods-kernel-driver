@@ -250,6 +250,13 @@ int esc_mods_pci_get_bar_info_2(struct mods_client             *client,
 
 	bar_resource_offset = 0;
 	for (i = 0; i < p->bar_index; i++) {
+		if (unlikely(bar_resource_offset >= PCI_NUM_RESOURCES ||
+			     !pci_resource_flags(dev, bar_resource_offset))) {
+			cl_error("invalid pci bar index %u\n", p->bar_index);
+			err = -EINVAL;
+			goto error;
+		}
+
 #if defined(MODS_HAS_IORESOURCE_MEM_64)
 		if (pci_resource_flags(dev, bar_resource_offset)
 		    & IORESOURCE_MEM_64) {
@@ -265,12 +272,19 @@ int esc_mods_pci_get_bar_info_2(struct mods_client             *client,
 			bar_resource_offset += 1;
 		}
 	}
-	p->base_address = pci_resource_start(dev, bar_resource_offset);
-	p->bar_size	= pci_resource_len(dev, bar_resource_offset);
 
+	if (bar_resource_offset < PCI_NUM_RESOURCES && pci_resource_flags(dev, bar_resource_offset)) {
+		p->base_address = pci_resource_start(dev, bar_resource_offset);
+		p->bar_size     = pci_resource_len(dev, bar_resource_offset);
+	} else {
+		cl_error("invalid pci bar index %u\n", p->bar_index);
+		err = -EINVAL;
+	}
+
+error:
 	pci_dev_put(dev);
 	LOG_EXT();
-	return OK;
+	return err;
 }
 
 int esc_mods_pci_get_bar_info(struct mods_client           *client,
@@ -279,17 +293,17 @@ int esc_mods_pci_get_bar_info(struct mods_client           *client,
 	int err;
 	struct MODS_PCI_GET_BAR_INFO_2 get_bar_info = { {0} };
 
-	get_bar_info.pci_device.domain	 = 0;
-	get_bar_info.pci_device.bus	 = p->pci_device.bus;
-	get_bar_info.pci_device.device	 = p->pci_device.device;
+	get_bar_info.pci_device.domain   = 0;
+	get_bar_info.pci_device.bus      = p->pci_device.bus;
+	get_bar_info.pci_device.device   = p->pci_device.device;
 	get_bar_info.pci_device.function = p->pci_device.function;
-	get_bar_info.bar_index		 = p->bar_index;
+	get_bar_info.bar_index           = p->bar_index;
 
 	err = esc_mods_pci_get_bar_info_2(client, &get_bar_info);
 
 	if (likely(!err)) {
-		p->base_address	= get_bar_info.base_address;
-		p->bar_size	= get_bar_info.bar_size;
+		p->base_address = get_bar_info.base_address;
+		p->bar_size     = get_bar_info.bar_size;
 	}
 
 	return err;
@@ -359,6 +373,7 @@ int esc_mods_pci_read_2(struct mods_client *client, struct MODS_PCI_READ_2 *p)
 
 	if (p->address > MODS_MAX_PCI_CFG_ADDR) {
 		cl_error("invalid pci config space address 0x%x\n", p->address);
+		pci_dev_put(dev);
 		LOG_EXT();
 		return -EINVAL;
 	}
@@ -488,6 +503,7 @@ int esc_mods_pci_write_2(struct mods_client *client, struct MODS_PCI_WRITE_2 *p)
 
 	if (p->address > MODS_MAX_PCI_CFG_ADDR) {
 		cl_error("invalid pci config space address 0x%x\n", p->address);
+		pci_dev_put(dev);
 		LOG_EXT();
 		return -EINVAL;
 	}
@@ -631,6 +647,7 @@ int esc_mods_pci_bus_remove_dev(struct mods_client             *client,
 		 p->pci_device.function);
 
 	pci_stop_and_remove_bus_device(dev);
+	pci_dev_put(dev);
 	LOG_EXT();
 	return err;
 #else
@@ -1061,7 +1078,7 @@ int esc_mods_read_dev_property(struct mods_client            *client,
 		goto error;
 	}
 
-	if (unlikely(sizeof(64) * p->array_size > sizeof(p->output))) {
+	if (unlikely(sizeof(u64) * p->array_size > sizeof(p->output))) {
 		cl_error("requested size %zu exceeds output array size %zu\n",
 			 sizeof(u64) * p->array_size,
 			 sizeof(p->output));

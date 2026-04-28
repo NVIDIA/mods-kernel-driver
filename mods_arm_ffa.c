@@ -34,6 +34,8 @@ static int ffa_probe(struct ffa_device *ffa_dev)
 {
 	int ret = 0;
 
+	mutex_lock(&mods_ffa_lock);
+
 #if KERNEL_VERSION(6, 1, 0) <= MODS_KERNEL_VERSION || defined(FFA_PARTITION_AARCH64_EXEC)
 	const struct ffa_msg_ops *ffa_ops = NULL;
 
@@ -46,6 +48,7 @@ static int ffa_probe(struct ffa_device *ffa_dev)
 #endif
 	if (!ffa_ops) {
 		mods_error_printk("failed \"method\" init: ffa\n");
+		mutex_unlock(&mods_ffa_lock);
 		return -ENOENT;
 	}
 	mods_ffa_info.ffa_dev = ffa_dev;
@@ -53,13 +56,17 @@ static int ffa_probe(struct ffa_device *ffa_dev)
 
 	mods_debug_printk(DEBUG_TEGRADMA, "mods ffa driver registered\n");
 
+	mutex_unlock(&mods_ffa_lock);
+
 	return ret;
 }
 
 static void ffa_remove(struct ffa_device *ffa_dev)
 {
+	mutex_lock(&mods_ffa_lock);
 	mods_ffa_info.ffa_dev = NULL;
 	mods_ffa_info.ffa_ops = NULL;
+	mutex_unlock(&mods_ffa_lock);
 }
 
 static struct ffa_driver mods_ffa_driver = {
@@ -93,7 +100,9 @@ int esc_mods_arm_ffa_cmd(struct mods_client *client,
 	// 32 bit of the reg value
 	data.data2 = p->indata[1];
 
+	mutex_lock(&mods_ffa_lock);
 	if (!mods_ffa_info.ffa_ops) {
+		mutex_unlock(&mods_ffa_lock);
 		cl_error("mods ffa cmd error, device not found\n");
 		return -ENODEV;
 	}
@@ -136,10 +145,10 @@ int esc_mods_arm_ffa_cmd(struct mods_client *client,
 		break;
 	default:
 		cl_error("Unexpected command from SP 0x%llx\n", (unsigned long long)p->cmd);
+		mutex_unlock(&mods_ffa_lock);
 		return err;
 	}
 
-	mutex_lock(&mods_ffa_lock);
 	err = mods_ffa_info.ffa_ops->sync_send_receive(mods_ffa_info.ffa_dev, &data);
 	mutex_unlock(&mods_ffa_lock);
 

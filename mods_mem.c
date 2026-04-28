@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* SPDX-FileCopyrightText: Copyright (c) 2008-2025, NVIDIA CORPORATION.  All rights reserved. */
+/* SPDX-FileCopyrightText: Copyright (c) 2008-2026, NVIDIA CORPORATION.  All rights reserved. */
 
 #include "mods_internal.h"
 
+#include <linux/bitmap.h>
 #include <linux/bitops.h>
 #include <linux/mutex.h>
 #include <linux/pagemap.h>
@@ -56,9 +57,10 @@ static bool validate_mem_handle(struct mods_client   *client,
 	return false;
 }
 
-static u64 get_client_mask(struct mods_client *client)
+static u64 client_bit(struct mods_client *client)
 {
-	return (u64)1u << (client->client_id - 1);
+	WARN_ON(client->client_id == 0 || client->client_id > MODS_MAX_CLIENTS);
+	return client->client_id - 1;
 }
 
 /****************************
@@ -131,6 +133,41 @@ static enum dma_data_direction get_dma_dir(struct MODS_MEM_INFO *p_mem_info)
 	return p_mem_info->device_ro ? DMA_TO_DEVICE : DMA_BIDIRECTIONAL;
 }
 
+static void unmap_sg(struct device          *dev,
+		     struct scatterlist     *sg,
+		     u32                     num_chunks,
+		     enum dma_data_direction dir)
+{
+	do {
+		struct scatterlist *cur_sg;
+		u32                 chunks_to_unmap = 0;
+
+		for_each_sg(sg, cur_sg, num_chunks, chunks_to_unmap)
+			if (!sg_dma_len(cur_sg))
+				break;
+
+		if (chunks_to_unmap) {
+			dma_unmap_sg(dev, sg, (int)chunks_to_unmap, dir);
+			sg_dma_address(sg) = 0;
+
+			sg         += chunks_to_unmap;
+			num_chunks -= chunks_to_unmap;
+		}
+
+		/* Skip chunks which don't maintain any DMA mappings.
+		 * This can happen for large allocations with the workaround
+		 * in map_sg().
+		 */
+		if (num_chunks) {
+			for_each_sg(sg, sg, num_chunks, chunks_to_unmap)
+				if (sg_dma_len(sg))
+					break;
+			num_chunks -= chunks_to_unmap;
+		}
+
+	} while (num_chunks);
+}
+
 #if defined(CONFIG_PCI) || defined(MODS_HAS_TEGRA)
 static int map_sg(struct mods_client     *client,
 		  struct device          *dev,
@@ -139,14 +176,16 @@ static int map_sg(struct mods_client     *client,
 		  u32                     num_pages,
 		  enum dma_data_direction dir)
 {
-	const u32 max_pages = (u32)(0x100000000ULL >> PAGE_SHIFT);
+	struct scatterlist *next_sg = sg;
+	const u32 max_pages        = (u32)(0x100000000ULL >> PAGE_SHIFT);
+	u32       remaining_chunks = num_chunks;
 
 	if (num_pages >= max_pages)
 		cl_warn("requested to map %u pages in %u chunks\n",
 			num_pages, num_chunks);
 
 	do {
-		u32 chunks_to_map = num_chunks;
+		u32 chunks_to_map = remaining_chunks;
 		u32 pages_to_map  = num_pages;
 		int mapped;
 
@@ -163,7 +202,7 @@ static int map_sg(struct mods_client     *client,
 
 			pages_to_map = 0;
 
-			for_each_sg(sg, cur_sg, num_chunks, chunks_to_map) {
+			for_each_sg(next_sg, cur_sg, remaining_chunks, chunks_to_map) {
 
 				const unsigned int len = cur_sg->length;
 				const u32 cur_pages = len >> PAGE_SHIFT;
@@ -175,62 +214,30 @@ static int map_sg(struct mods_client     *client,
 			}
 		}
 
-		mapped = dma_map_sg(dev, sg, (int)chunks_to_map, dir);
+		mapped = dma_map_sg(dev, next_sg, (int)chunks_to_map, dir);
 
 		if (mapped == 0) {
 			cl_error(
 				"failed to dma map %u chunks at 0x%llx to dev %s with dma mask 0x%llx\n",
-				num_chunks,
-				(unsigned long long)sg_phys(sg),
+				remaining_chunks,
+				(unsigned long long)sg_phys(next_sg),
 				dev_name(dev),
 				(unsigned long long)dma_get_mask(dev));
 
+			if (remaining_chunks < num_chunks)
+				unmap_sg(dev, sg, num_chunks - remaining_chunks, dir);
 			return -EIO;
 		}
 
-		sg         += chunks_to_map;
-		num_chunks -= chunks_to_map;
-		num_pages  -= pages_to_map;
+		next_sg          += chunks_to_map;
+		remaining_chunks -= chunks_to_map;
+		num_pages        -= pages_to_map;
 
-	} while (num_chunks);
+	} while (remaining_chunks);
 
 	return OK;
 }
 #endif
-
-static void unmap_sg(struct device          *dev,
-		     struct scatterlist     *sg,
-		     u32                     num_chunks,
-		     enum dma_data_direction dir)
-{
-	do {
-		struct scatterlist *cur_sg;
-		u32                 chunks_to_unmap = 0;
-
-		for_each_sg(sg, cur_sg, num_chunks, chunks_to_unmap)
-			if (!sg_dma_len(cur_sg))
-				break;
-
-		dma_unmap_sg(dev, sg, (int)chunks_to_unmap, dir);
-
-		sg_dma_address(sg) = 0;
-
-		sg         += chunks_to_unmap;
-		num_chunks -= chunks_to_unmap;
-
-		/* Skip chunks which don't maintain any DMA mappings.
-		 * This can happen for large allocations with the workaround
-		 * in map_sg().
-		 */
-		if (num_chunks) {
-			for_each_sg(sg, sg, num_chunks, chunks_to_unmap)
-				if (sg_dma_len(sg))
-					break;
-			num_chunks -= chunks_to_unmap;
-		}
-
-	} while (num_chunks);
-}
 
 /* Unmap and delete the specified DMA mapping */
 static void dma_unmap_and_free(struct mods_client   *client,
@@ -1096,7 +1103,7 @@ static int unregister_and_free_alloc(struct mods_client   *client,
 
 		dma_unmap_all(client, p_del_mem, NULL);
 
-		p_del_mem->shared_client_mask &= ~get_client_mask(client);
+		clear_bit(client_bit(client), p_del_mem->shared_client_mask);
 
 		err = OK;
 	} else {
@@ -1113,7 +1120,7 @@ int mods_unregister_all_alloc(struct mods_client *client)
 	struct list_head     *iter;
 	struct list_head     *tmp;
 	struct MODS_MEM_INFO *p_mem_info;
-	const u64             client_mask = get_client_mask(client);
+	const u64             cbit        = client_bit(client);
 	int                   final_err   = OK;
 	int                   err;
 
@@ -1130,7 +1137,7 @@ int mods_unregister_all_alloc(struct mods_client *client)
 	head = &avail_mem_reservations;
 	list_for_each(iter, head) {
 		p_mem_info = list_entry(iter, struct MODS_MEM_INFO, list);
-		if (p_mem_info->shared_client_mask & client_mask) {
+		if (test_bit(cbit, p_mem_info->shared_client_mask)) {
 			WARN_ON(!p_mem_info->shared);
 			err = unregister_and_free_alloc(client, p_mem_info);
 			if (likely(!final_err))
@@ -1317,6 +1324,7 @@ struct MODS_MEM_INFO *mods_find_alloc(struct mods_client *client, u64 phys_addr)
 	struct list_head     *plist_head = &client->mem_alloc_list;
 	struct list_head     *plist_iter;
 	struct MODS_MEM_INFO *p_mem_info = NULL;
+	const u64             cbit       = client_bit(client);
 
 	list_for_each(plist_iter, plist_head) {
 		u64 offset;
@@ -1327,27 +1335,23 @@ struct MODS_MEM_INFO *mods_find_alloc(struct mods_client *client, u64 phys_addr)
 			return p_mem_info;
 	}
 
-	if (!p_mem_info) {
+	mutex_lock(&mem_reservation_mtx);
 
-		const u64 client_mask = get_client_mask(client);
+	plist_head = &avail_mem_reservations;
+	list_for_each(plist_iter, plist_head) {
+		p_mem_info = list_entry(plist_iter, struct MODS_MEM_INFO, list);
 
-		mutex_lock(&mem_reservation_mtx);
+		if (test_bit(cbit, p_mem_info->shared_client_mask)) {
+			u64 offset;
 
-		plist_head = &avail_mem_reservations;
-		list_for_each(plist_iter, plist_head) {
-			p_mem_info = list_entry(plist_iter, struct MODS_MEM_INFO, list);
-
-			if (p_mem_info->shared_client_mask & client_mask) {
-				u64 offset;
-
-				if (!get_alloc_offset(p_mem_info, phys_addr, &offset)) {
-					mutex_unlock(&mem_reservation_mtx);
-					return p_mem_info;
-				}
+			if (!get_alloc_offset(p_mem_info, phys_addr, &offset)) {
+				mutex_unlock(&mem_reservation_mtx);
+				return p_mem_info;
 			}
 		}
-		mutex_unlock(&mem_reservation_mtx);
 	}
+
+	mutex_unlock(&mem_reservation_mtx);
 
 	/* The physical address doesn't belong to any allocation */
 	return NULL;
@@ -1387,19 +1391,19 @@ static inline size_t calc_mem_info_size_no_bitmap(u32 num_chunks)
 	       num_chunks * sizeof(struct scatterlist);
 }
 
-static inline u32 calc_mem_info_size(u32 num_chunks, u8 cache_type)
+static inline size_t calc_mem_info_size(u32 num_chunks, u8 cache_type)
 {
 	size_t size = calc_mem_info_size_no_bitmap(num_chunks);
 
 	size += sizeof(long) * BITS_TO_LONGS(num_chunks);
 
-	return (u32)size;
+	return size;
 }
 
 static void init_mem_info(struct MODS_MEM_INFO *p_mem_info,
 			  u32                   num_chunks,
 			  u8                    cache_type,
-			  u32                   alloc_size)
+			  size_t                alloc_size)
 {
 	p_mem_info->sg         = p_mem_info->alloc_sg;
 	p_mem_info->num_chunks = num_chunks;
@@ -1415,11 +1419,11 @@ static void init_mem_info(struct MODS_MEM_INFO *p_mem_info,
 static struct MODS_MEM_INFO *alloc_mem_info(struct mods_client *client,
 					    u32                 num_chunks,
 					    u8                  cache_type,
-					    u32                *alloc_size)
+					    size_t             *alloc_size)
 {
 	struct MODS_MEM_INFO *p_mem_info = NULL;
 
-	const u32 calc_size = calc_mem_info_size(num_chunks, cache_type);
+	const size_t calc_size = calc_mem_info_size(num_chunks, cache_type);
 
 	*alloc_size = calc_size;
 
@@ -1427,7 +1431,8 @@ static struct MODS_MEM_INFO *alloc_mem_info(struct mods_client *client,
 		p_mem_info = kzalloc(calc_size, GFP_KERNEL | __GFP_NORETRY);
 	else {
 		p_mem_info = vmalloc(calc_size);
-		memset(p_mem_info, 0, calc_size);
+		if (likely(p_mem_info))
+			memset(p_mem_info, 0, calc_size);
 	}
 
 	if (likely(p_mem_info)) {
@@ -1450,7 +1455,7 @@ static struct MODS_MEM_INFO *optimize_chunks(struct mods_client   *client,
 	struct scatterlist   *sg;
 	struct MODS_MEM_INFO *p_new_mem_info = NULL;
 	u32                   num_chunks     = 0;
-	u32                   alloc_size     = 0;
+	size_t                alloc_size     = 0;
 
 	for_each_sg(p_mem_info->alloc_sg, sg,
 		    p_mem_info->num_chunks, num_chunks) {
@@ -1490,7 +1495,7 @@ int esc_mods_alloc_pages_2(struct mods_client        *client,
 {
 	struct MODS_MEM_INFO *p_mem_info = NULL;
 	u32                   num_pages;
-	u32                   alloc_size;
+	size_t                alloc_size;
 	u32                   num_chunks;
 	int                   err        = -EINVAL;
 	u8                    cache_type;
@@ -1562,7 +1567,7 @@ int esc_mods_alloc_pages_2(struct mods_client        *client,
 	p_mem_info = alloc_mem_info(client, num_chunks, cache_type, &alloc_size);
 
 	if (unlikely(!p_mem_info)) {
-		cl_error("failed to allocate auxiliary 0x%x bytes for %u chunks to hold %u pages\n",
+		cl_error("failed to allocate auxiliary 0x%zx bytes for %u chunks to hold %u pages\n",
 			 alloc_size, num_chunks, num_pages);
 		err = -ENOMEM;
 		goto failed;
@@ -1939,7 +1944,7 @@ int esc_mods_merge_pages(struct mods_client      *client,
 	struct MODS_MEM_INFO *p_mem_info;
 	int          err        = OK;
 	u32          num_chunks = 0;
-	u32          alloc_size = 0;
+	size_t       alloc_size = 0;
 	unsigned int i;
 	bool         contig     = true;
 	u32          cache_type;
@@ -2884,7 +2889,7 @@ int esc_mods_share_allocation(struct mods_client             *client,
 
 	p_mem_info->reservation_tag = p->tag;
 	p_mem_info->shared = true;
-	p_mem_info->shared_client_mask |= get_client_mask(client);
+	set_bit(client_bit(client), p_mem_info->shared_client_mask);
 
 	mutex_lock(&mem_reservation_mtx);
 	add_to_reservations(client, p_mem_info);
@@ -2950,9 +2955,9 @@ int esc_mods_get_reserved_allocation(struct mods_client             *client,
 	}
 
 	if (p_mem_info->shared) {
-		const u64 client_mask = get_client_mask(client);
+		const u64 cbit = client_bit(client);
 
-		if (p_mem_info->shared_client_mask & client_mask) {
+		if (test_bit(cbit, p_mem_info->shared_client_mask)) {
 			mutex_unlock(&mem_reservation_mtx);
 			mutex_unlock(&client->mtx);
 			cl_error("shared tag 0x%llx is already claimed by this client\n",
@@ -2961,7 +2966,7 @@ int esc_mods_get_reserved_allocation(struct mods_client             *client,
 			return -EINVAL;
 		}
 
-		p_mem_info->shared_client_mask |= client_mask;
+		set_bit(cbit, p_mem_info->shared_client_mask);
 	} else {
 		list_add(&p_mem_info->list, &client->mem_alloc_list);
 
@@ -3022,26 +3027,28 @@ int esc_mods_release_reserved_allocation(struct mods_client             *client,
 		}
 
 		if (p_mem_info->shared) {
-			const u64 client_mask = get_client_mask(client);
+			const u64 cbit = client_bit(client);
 
 			err = mutex_lock_interruptible(&mem_reservation_mtx);
 			if (unlikely(err))
 				goto failed;
 
-			if (!(p_mem_info->shared_client_mask & client_mask)) {
+			if (!test_bit(cbit, p_mem_info->shared_client_mask)) {
 				mutex_unlock(&mem_reservation_mtx);
 				cl_error("invalid handle %p\n", p_mem_info);
 				goto failed;
 			}
 
-			if (p_mem_info->shared_client_mask & ~client_mask) {
+			if (bitmap_weight(p_mem_info->shared_client_mask,
+					  MODS_MAX_CLIENTS) > 1) {
 				mutex_unlock(&mem_reservation_mtx);
 				cl_error("shared handle %p is used by other clients\n", p_mem_info);
 				goto failed;
 			}
 
 			p_mem_info->shared = false;
-			p_mem_info->shared_client_mask = 0;
+			bitmap_zero(p_mem_info->shared_client_mask,
+				    MODS_MAX_CLIENTS);
 			list_del(&p_mem_info->list);
 
 			mutex_unlock(&mem_reservation_mtx);

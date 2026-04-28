@@ -201,6 +201,8 @@ int esc_mods_set_qual_mode(struct mods_client *client,
 	dpriv->qual_mode = p->mode;
 
 cleanup:
+	if (dev)
+		pci_dev_put(dev);
 	LOG_EXT();
 	return err;
 }

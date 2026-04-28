@@ -303,7 +303,8 @@ static int bpmp_ipc_channel_init(struct mods_client *client,
 		}
 	}
 
-	bpmp_ipc_ch->is_init = true;
+	if (!err)
+		bpmp_ipc_ch->is_init = true;
 
 	return err;
 }

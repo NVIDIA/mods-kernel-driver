@@ -136,7 +136,7 @@ void mods_disable_device(struct mods_client *client,
 	WARN_ON(!mutex_is_locked(&irq_mtx));
 
 #if defined(MODS_HAS_ARM_SMCCC)
-	if (dpriv->qual_mode != MODS_QUAL_MODE_DISABLED) {
+	if (dpriv && dpriv->qual_mode != MODS_QUAL_MODE_DISABLED) {
 		cl_info("disabling qual mode on dev %04x:%02x:%02x.%x\n",
 			pci_domain_nr(dev->bus),
 			dev->bus->number,
@@ -474,6 +474,38 @@ static void setup_mask_info(struct dev_irq_map *newmap,
 }
 #endif
 
+static void free_irq_map(struct mods_client *client,
+			 struct dev_irq_map *del)
+{
+	unsigned long       flags  = 0;
+
+	LOG_ENT();
+
+	WARN_ON(client->client_id != del->client_id);
+
+	/* Disable interrupts on the device */
+	spin_lock_irqsave(&client->irq_lock, flags);
+	mods_disable_interrupts(del);
+	spin_unlock_irqrestore(&client->irq_lock, flags);
+
+	/* Unhook interrupts in the kernel */
+	free_irq(del->apic_irq, del);
+
+	/* Unmap aperture used for masking irqs */
+	if (del->dev_irq_aperture)
+		iounmap(del->dev_irq_aperture);
+
+#ifdef CONFIG_PCI
+	pci_dev_put(del->dev);
+#endif
+
+	/* Free memory */
+	kfree(del);
+	atomic_dec(&client->num_allocs);
+
+	LOG_EXT();
+}
+
 static int add_irq_map(struct mods_client         *client,
 		       struct pci_dev             *dev,
 		       struct MODS_REGISTER_IRQ_4 *p,
@@ -486,6 +518,12 @@ static int add_irq_map(struct mods_client         *client,
 	u32                 irq_type   = MODS_IRQ_TYPE_FROM_FLAGS(p->irq_flags);
 
 	LOG_ENT();
+
+	if (p->mask_info_cnt > MODS_IRQ_MAX_MASKS) {
+		cl_error("invalid mask count\n");
+		LOG_EXT();
+		return -EINVAL;
+	}
 
 	/* Get the flags based on the interrupt type*/
 	switch (irq_type) {
@@ -502,6 +540,7 @@ static int add_irq_map(struct mods_client         *client,
 		if (irq_flags & ~valid_mask) {
 			cl_error("invalid device interrupt flag %llx\n",
 				 (long long)irq_flags);
+			LOG_EXT();
 			return -EINVAL;
 		}
 		break;
@@ -547,6 +586,9 @@ static int add_irq_map(struct mods_client         *client,
 	list_add(&newmap->list, &client->irq_list);
 
 #ifdef CONFIG_PCI
+	if (dev)
+		pci_dev_get(dev);
+
 	/* Map BAR0 to be able to disable interrupts */
 	if ((irq_type == MODS_IRQ_TYPE_INT) &&
 	    (p->aperture_addr != 0) &&
@@ -558,6 +600,8 @@ static int add_irq_map(struct mods_client         *client,
 				 "failed to remap aperture: 0x%llx size=0x%x\n",
 				 p->aperture_addr,
 				 p->aperture_size);
+			list_del(&newmap->list);
+			free_irq_map(client, newmap);
 			LOG_EXT();
 			return -EPERM;
 		}
@@ -565,9 +609,6 @@ static int add_irq_map(struct mods_client         *client,
 		newmap->dev_irq_aperture = bar;
 		setup_mask_info(newmap, p, dev);
 	}
-
-	if (dev)
-		pci_dev_get(dev);
 #endif
 
 	/* Print out successful registration string */
@@ -631,38 +672,6 @@ static int add_irq_map(struct mods_client         *client,
 
 	LOG_EXT();
 	return OK;
-}
-
-static void mods_free_map(struct mods_client *client,
-			  struct dev_irq_map *del)
-{
-	unsigned long       flags  = 0;
-
-	LOG_ENT();
-
-	WARN_ON(client->client_id != del->client_id);
-
-	/* Disable interrupts on the device */
-	spin_lock_irqsave(&client->irq_lock, flags);
-	mods_disable_interrupts(del);
-	spin_unlock_irqrestore(&client->irq_lock, flags);
-
-	/* Unhook interrupts in the kernel */
-	free_irq(del->apic_irq, del);
-
-	/* Unmap aperture used for masking irqs */
-	if (del->dev_irq_aperture)
-		iounmap(del->dev_irq_aperture);
-
-#ifdef CONFIG_PCI
-	pci_dev_put(del->dev);
-#endif
-
-	/* Free memory */
-	kfree(del);
-	atomic_dec(&client->num_allocs);
-
-	LOG_EXT();
 }
 
 void mods_init_irq(void)
@@ -767,7 +776,7 @@ static int mods_free_irqs(struct mods_client *client,
 				 dev->bus->number,
 				 PCI_SLOT(dev->devfn),
 				 PCI_FUNC(dev->devfn));
-			mods_free_map(client, del);
+			free_irq_map(client, del);
 
 			WARN_ON(MODS_IRQ_TYPE_FROM_FLAGS(dpriv->irq_flags)
 				!= type);
@@ -782,9 +791,9 @@ static int mods_free_irqs(struct mods_client *client,
 
 	if (irq_type == MODS_IRQ_TYPE_MSIX) {
 		pci_disable_msix(dev);
-		kfree(dpriv->msix_entries);
 		if (dpriv->msix_entries)
 			atomic_dec(&client->num_allocs);
+		kfree(dpriv->msix_entries);
 		dpriv->msix_entries = NULL;
 	} else if (irq_type == MODS_IRQ_TYPE_MSI) {
 		pci_disable_msi(dev);
@@ -1235,7 +1244,7 @@ static int mods_unregister_cpu_irq(struct mods_client *client,
 			cl_debug(DEBUG_ISR,
 				 "unregistered CPU IRQ 0x%x\n",
 				 irq);
-			mods_free_map(client, del);
+			free_irq_map(client, del);
 			break;
 		}
 	}
@@ -1269,6 +1278,11 @@ int esc_mods_register_irq_3(struct mods_client         *client,
 {
 	struct MODS_REGISTER_IRQ_4 irq_data = { {0} };
 	u32 ii = 0;
+
+	if (p->mask_info_cnt > MODS_IRQ_MAX_MASKS) {
+		cl_error("invalid mask count\n");
+		return -EINVAL;
+	}
 
 	irq_data.dev = p->dev;
 	irq_data.aperture_addr = p->aperture_addr;

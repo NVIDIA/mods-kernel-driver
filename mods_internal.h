@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/* SPDX-FileCopyrightText: Copyright (c) 2008-2025, NVIDIA CORPORATION.  All rights reserved. */
+/* SPDX-FileCopyrightText: Copyright (c) 2008-2026, NVIDIA CORPORATION.  All rights reserved. */
 
 #ifndef _MODS_INTERNAL_H_
 #define _MODS_INTERNAL_H_
@@ -12,6 +12,7 @@
 #include <linux/pci.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
+#include <linux/types.h>
 #include <linux/version.h>
 
 #include "mods_config.h"
@@ -43,6 +44,8 @@
 
 #define MSI_DEV_FOUND	  1
 #define MSI_DEV_NOT_FOUND 0
+
+#define MODS_MAX_CLIENTS 128
 
 struct en_dev_entry {
 	struct list_head     list;
@@ -145,7 +148,7 @@ struct MODS_MEM_INFO {
 	struct list_head dma_map_list;
 
 	u64 reservation_tag;            /* zero if not reserved */
-	u64 shared_client_mask;         /* clients which can access this shared allocation */
+	DECLARE_BITMAP(shared_client_mask, MODS_MAX_CLIENTS); /* clients which can access */
 	u32 num_pages;                  /* total number of allocated pages */
 	u32 num_chunks;                 /* number of allocated contig chunks */
 	int numa_node;                  /* numa node for the allocation */
@@ -214,7 +217,6 @@ int mods_get_force_qual_mode(void);
 
 #define IRQ_MAX			(256+PCI_IRQ_MAX)
 #define PCI_IRQ_MAX		15
-#define MODS_MAX_CLIENTS	128
 
 #define IRQ_VAL_POISON		0xfafbfcfdU
 
