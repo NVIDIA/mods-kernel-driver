@@ -324,14 +324,6 @@ struct mods_priv {
 #define MODS_PGPROT_WC pgprot_writecombine
 
 /* ACPI */
-#ifdef MODS_HAS_NEW_ACPI_WALK
-#define MODS_ACPI_WALK_NAMESPACE(type, start_object, max_depth, user_function, \
-				 context, return_value)\
-	acpi_walk_namespace(type, start_object, max_depth, user_function, NULL,\
-			    context, return_value)
-#else
-#define MODS_ACPI_WALK_NAMESPACE acpi_walk_namespace
-#endif
 #ifdef MODS_HAS_NEW_ACPI_HANDLE
 #define MODS_ACPI_HANDLE(dev) ACPI_HANDLE(dev)
 #else
@@ -350,6 +342,12 @@ struct mods_priv {
 #else
 #	define MODS_KMAP kmap
 #	define MODS_KUNMAP kunmap
+#endif
+
+#if KERNEL_VERSION(7, 0, 0) <= MODS_KERNEL_VERSION
+#       define MODS_ZALLOC(P) kzalloc_obj(P, GFP_KERNEL | __GFP_NORETRY)
+#else
+#       define MODS_ZALLOC(P) kzalloc(sizeof(P), GFP_KERNEL | __GFP_NORETRY)
 #endif
 
 /* ************************************************************************* */
@@ -526,6 +524,10 @@ int esc_mods_pci_set_dma_mask(struct mods_client      *client,
 			     struct MODS_PCI_DMA_MASK *dma_mask);
 int esc_mods_pci_reset_function(struct mods_client    *client,
 				struct mods_pci_dev_2 *pcidev);
+#ifdef MODS_HAS_PCI_RESET_BUS
+int esc_mods_pci_reset_bus(struct mods_client    *client,
+				struct mods_pci_dev_2 *pcidev);
+#endif
 #ifdef MODS_HAS_DEV_PROPS
 int esc_mods_read_dev_property(struct mods_client            *client,
 			       struct MODS_READ_DEV_PROPERTY *p);
@@ -534,8 +536,6 @@ int esc_mods_read_dev_property(struct mods_client            *client,
 /* irq */
 #if defined(MODS_HAS_TEGRA) && defined(CONFIG_OF) && defined(CONFIG_OF_IRQ)
 int esc_mods_map_irq(struct mods_client *client, struct MODS_DT_INFO *p);
-int esc_mods_map_irq_to_gpio(struct mods_client *client,
-						struct MODS_GPIO_INFO *p);
 #endif
 int esc_mods_register_irq(struct mods_client       *client,
 			  struct MODS_REGISTER_IRQ *p);
@@ -718,7 +718,7 @@ void mods_ffa_abi_unregister(void);
 int esc_mods_set_qual_mode(struct mods_client *client, struct MODS_SET_QUAL_MODE *p);
 
 int mods_qdev_enable(struct pci_dev *epdev, u8 qual_mode, void **p_qdev);
-void mods_qdev_disable(void *qdev);
+int mods_qdev_disable(void *qdev);
 #endif
 
 #endif	/* _MODS_INTERNAL_H_  */

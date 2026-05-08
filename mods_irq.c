@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* SPDX-FileCopyrightText: Copyright (c) 2008-2024, NVIDIA CORPORATION.  All rights reserved. */
+/* SPDX-FileCopyrightText: Copyright (c) 2008-2026, NVIDIA CORPORATION.  All rights reserved. */
 
 #include "mods_internal.h"
 
@@ -12,8 +12,6 @@
 #include <linux/io.h>
 #include <linux/platform_device.h>
 #include <linux/of_platform.h>
-#include <linux/gpio.h>
-#include <linux/of_gpio.h>
 #endif
 
 #define PCI_VENDOR_ID_NVIDIA 0x10de
@@ -92,7 +90,7 @@ int mods_enable_device(struct mods_client   *client,
 	}
 
 #if defined(MODS_HAS_ARM_SMCCC)
-	if (dpriv->qual_mode != MODS_QUAL_MODE_DISABLED) {
+	if (dpriv->qual_mode != MODS_QUAL_MODE_DISABLED && !mods_get_force_qual_mode()) {
 		cl_info("enabling qual mode %u on dev %04x:%02x:%02x.%x\n",
 			dpriv->qual_mode,
 			pci_domain_nr(dev->bus),
@@ -136,14 +134,15 @@ void mods_disable_device(struct mods_client *client,
 	WARN_ON(!mutex_is_locked(&irq_mtx));
 
 #if defined(MODS_HAS_ARM_SMCCC)
-	if (dpriv && dpriv->qual_mode != MODS_QUAL_MODE_DISABLED) {
+	if (dpriv && dpriv->qual_dev && !mods_get_force_qual_mode()) {
 		cl_info("disabling qual mode on dev %04x:%02x:%02x.%x\n",
 			pci_domain_nr(dev->bus),
 			dev->bus->number,
 			PCI_SLOT(dev->devfn),
 			PCI_FUNC(dev->devfn));
 
-		mods_qdev_disable(dpriv->qual_dev);
+		if (mods_qdev_disable(dpriv->qual_dev))
+			cl_warn("failed to disable qual mode\n");
 		dpriv->qual_dev = NULL;
 	}
 #endif
@@ -551,7 +550,7 @@ static int add_irq_map(struct mods_client         *client,
 	}
 
 	/* Allocate memory for the new entry */
-	newmap = kzalloc(sizeof(*newmap), GFP_KERNEL | __GFP_NORETRY);
+	newmap = MODS_ZALLOC(*newmap);
 	if (unlikely(!newmap)) {
 		LOG_EXT();
 		return -ENOMEM;
@@ -1666,62 +1665,6 @@ int esc_mods_map_irq(struct mods_client  *client,
 error:
 	of_node_put(np);
 	/* enable the interrupt */
-	return err;
-}
-
-int esc_mods_map_irq_to_gpio(struct mods_client    *client,
-			     struct MODS_GPIO_INFO *p)
-{
-	//TODO: Make sure you are allocating gpio properly
-	struct device_node *np;
-	int gpio_handle;
-	int irq;
-	int err = 0;
-
-	/* Make sure strings from userspace are null-terminated */
-	p->dt_name[sizeof(p->dt_name) - 1] = 0;
-	p->full_name[sizeof(p->full_name) - 1] = 0;
-
-	np = of_find_node_by_name(NULL, p->dt_name);
-
-	if (!np) {
-		cl_error("node %s is not valid\n", p->full_name);
-		err = -EINVAL;
-		goto error;
-	}
-
-	while (of_node_cmp(np->full_name, p->full_name)) {
-		np = of_find_node_by_name(np, p->dt_name);
-		if (!np) {
-			cl_error("node %s is not valid\n", p->full_name);
-			err = -EINVAL;
-			goto error;
-		}
-	}
-
-	gpio_handle = of_get_named_gpio(np, p->name, 0);
-	if (!gpio_is_valid(gpio_handle)) {
-		cl_error("gpio %s is missing\n", p->name);
-		err = gpio_handle;
-		goto error;
-	}
-
-	err = gpio_direction_input(gpio_handle);
-	if (err < 0) {
-		cl_error("pex_rst_gpio input direction change failed\n");
-		goto error;
-	}
-
-	irq = gpio_to_irq(gpio_handle);
-	if (irq < 0) {
-		cl_error("Unable to get irq for pex_rst_gpio\n");
-		err = -EINVAL;
-		goto error;
-	}
-	p->irq = irq;
-
-error:
-	of_node_put(np);
 	return err;
 }
 #endif

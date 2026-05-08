@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* SPDX-FileCopyrightText: Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved. */
+/* SPDX-FileCopyrightText: Copyright (c) 2008-2026, NVIDIA CORPORATION.  All rights reserved. */
 
 #include "mods_internal.h"
 
@@ -133,12 +133,13 @@ static void mods_acpi_handle_init(struct mods_client *client,
 				  char               *method_name,
 				  acpi_handle        *handler)
 {
-	MODS_ACPI_WALK_NAMESPACE(ACPI_TYPE_ANY,
-				 ACPI_ROOT_OBJECT,
-				 ACPI_UINT32_MAX,
-				 mods_acpi_find_acpi_handler,
-				 method_name,
-				 handler);
+	acpi_walk_namespace(ACPI_TYPE_ANY,
+			    ACPI_ROOT_OBJECT,
+			    ACPI_UINT32_MAX,
+			    mods_acpi_find_acpi_handler,
+			    NULL,
+			    method_name,
+			    handler);
 
 	if (!(*handler)) {
 		cl_debug(DEBUG_ACPI,

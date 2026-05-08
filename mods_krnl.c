@@ -23,6 +23,9 @@
 #   include <linux/screen_info.h>
 #   include <asm/msr.h>
 #endif
+#ifdef MODS_HAS_SYSFB_SCREEN_INFO
+#   include <linux/sysfb.h>
+#endif
 
 /***********************************************************************
  * mods_krnl_* functions, driver interfaces called by the Linux kernel *
@@ -98,7 +101,7 @@ static int mods_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
 	struct en_dev_entry *dpriv;
 
-	dpriv = kzalloc(sizeof(*dpriv), GFP_KERNEL | __GFP_NORETRY);
+	dpriv = MODS_ZALLOC(*dpriv);
 	if (unlikely(!dpriv))
 		return -ENOMEM;
 
@@ -106,26 +109,23 @@ static int mods_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 
 #if defined(MODS_HAS_ARM_SMCCC)
 	{
-		int err = 0;
-		int qm = mods_get_force_qual_mode();
+		const int qm = mods_get_force_qual_mode();
 
 		if (qm) {
-			qm &= (MODS_QUAL_MODE_LINK_IDE | MODS_QUAL_MODE_C2C | MODS_QUAL_MODE_SEL_IDE);
+			int err;
 
-			mods_info_printk("enabling qual mode %u on dev %04x:%02x:%02x.%x\n",
-				qm,
-				pci_domain_nr(dev->bus),
-				dev->bus->number,
-				PCI_SLOT(dev->devfn),
-				PCI_FUNC(dev->devfn));
+			mods_info_printk("enabling qual mode %d on dev %04x:%02x:%02x.%x\n",
+					 qm,
+					 pci_domain_nr(dev->bus),
+					 dev->bus->number,
+					 PCI_SLOT(dev->devfn),
+					 PCI_FUNC(dev->devfn));
 
 			err = mods_qdev_enable(dev, qm, &dpriv->qual_dev);
-			if (unlikely(err)) {
-				mods_error_printk("failed to enable qual mode\n");
-				pci_dev_put(dev);
-				kfree(dpriv);
-				return err;
-			}
+			if (unlikely(err))
+				mods_warning_printk("failed to enable qual mode\n");
+			else
+				dpriv->qual_mode = (u8)qm;
 		}
 	}
 #endif
@@ -175,7 +175,8 @@ static void mods_pci_remove(struct pci_dev *dev)
 			PCI_SLOT(dev->devfn),
 			PCI_FUNC(dev->devfn));
 
-		mods_qdev_disable(dpriv->qual_dev);
+		if (mods_qdev_disable(dpriv->qual_dev))
+			mods_warning_printk("failed to disable qual mode\n");
 		dpriv->qual_dev = NULL;
 	}
 #endif
@@ -452,7 +453,9 @@ int mods_get_multi_instance(void)
 
 void mods_set_force_qual_mode(int qm)
 {
-	force_qual_mode = qm;
+	const int valid_mask = MODS_QUAL_MODE_LINK_IDE | MODS_QUAL_MODE_C2C | MODS_QUAL_MODE_SEL_IDE;
+
+	force_qual_mode = qm & valid_mask;
 }
 
 int mods_get_force_qual_mode(void)
@@ -1290,7 +1293,7 @@ static int mods_krnl_mmap(struct file *fp, struct vm_area_struct *vma)
 
 	vma->vm_ops = &mods_krnl_vm_ops;
 
-	p_map_mem = kzalloc(sizeof(*p_map_mem), GFP_KERNEL | __GFP_NORETRY);
+	p_map_mem = MODS_ZALLOC(*p_map_mem);
 	if (unlikely(!p_map_mem)) {
 		LOG_EXT();
 		return -ENOMEM;
@@ -1474,16 +1477,29 @@ static int map_internal(struct mods_client    *client,
 }
 
 #if defined(CONFIG_X86)
-static void mods_get_screen_info(struct MODS_SCREEN_INFO *p)
+static void get_screen_info(struct MODS_SCREEN_INFO_2 *p)
 {
-	p->orig_video_mode = screen_info.orig_video_mode;
-	p->orig_video_is_vga = screen_info.orig_video_isVGA;
-	p->lfb_width = screen_info.lfb_width;
-	p->lfb_height = screen_info.lfb_height;
-	p->lfb_depth = screen_info.lfb_depth;
-	p->lfb_base = screen_info.lfb_base;
-	p->lfb_size = screen_info.lfb_size;
-	p->lfb_linelength = screen_info.lfb_linelength;
+	const struct screen_info *si;
+
+#ifdef MODS_HAS_SYSFB_SCREEN_INFO
+	si = &sysfb_primary_display.screen;
+#else
+	si = &screen_info;
+#endif
+
+	memset(p, 0, sizeof(*p));
+
+	p->info.orig_video_mode   = si->orig_video_mode;
+	p->info.orig_video_is_vga = si->orig_video_isVGA;
+	p->info.lfb_width         = si->lfb_width;
+	p->info.lfb_height        = si->lfb_height;
+	p->info.lfb_depth         = si->lfb_depth;
+	p->info.lfb_base          = si->lfb_base;
+	p->info.lfb_size          = si->lfb_size;
+	p->info.lfb_linelength    = si->lfb_linelength;
+#if defined(VIDEO_CAPABILITY_64BIT_BASE)
+	p->ext_lfb_base           = si->ext_lfb_base;
+#endif
 }
 #endif
 
@@ -1509,12 +1525,14 @@ static int esc_mods_get_kernel_version(struct mods_client      *client,
 static int esc_mods_get_screen_info(struct mods_client      *client,
 				    struct MODS_SCREEN_INFO *p)
 {
-	mods_get_screen_info(p);
+	struct MODS_SCREEN_INFO_2 si2;
 
-#if defined(VIDEO_CAPABILITY_64BIT_BASE)
-	if (screen_info.ext_lfb_base)
+	get_screen_info(&si2);
+
+	if (si2.ext_lfb_base)
 		return -EOVERFLOW;
-#endif
+
+	*p = si2.info;
 
 	return OK;
 }
@@ -1527,16 +1545,10 @@ static int esc_mods_get_screen_info_2(struct mods_client        *client,
 	bool         found = false;
 #endif
 
-	mods_get_screen_info(&p->info);
-
-#if defined(VIDEO_CAPABILITY_64BIT_BASE)
-	p->ext_lfb_base = screen_info.ext_lfb_base;
-#else
-	p->ext_lfb_base = 0;
-#endif
+	get_screen_info(p);
 
 #if defined(CONFIG_FB) && defined(MODS_HAS_FB_SET_SUSPEND)
-	if (screen_info.orig_video_isVGA != VIDEO_TYPE_EFI)
+	if (p->info.orig_video_is_vga != VIDEO_TYPE_EFI)
 		return OK;
 
 	/* With pci=realloc on the kernel command line, GPU BAR1 can be
@@ -1635,8 +1647,15 @@ static int resume_fb(struct mods_client *client)
 	return err;
 }
 #else
-#define suspend_fb(client) (-EINVAL)
-#define resume_fb(client) (-EINVAL)
+static int suspend_fb(struct mods_client *client)
+{
+	return -EINVAL;
+}
+
+static int resume_fb(struct mods_client *client)
+{
+	return -EINVAL;
+}
 #endif
 
 static atomic_t console_is_locked;
@@ -2336,6 +2355,14 @@ static long mods_krnl_ioctl(struct file  *fp,
 			   mods_pci_dev_2);
 		break;
 
+#ifdef MODS_HAS_PCI_RESET_BUS
+	case MODS_ESC_PCI_RESET_BUS:
+		MODS_IOCTL(MODS_ESC_PCI_RESET_BUS,
+			   esc_mods_pci_reset_bus,
+			   mods_pci_dev_2);
+		break;
+#endif
+
 #ifdef MODS_HAS_DEV_PROPS
 	case MODS_ESC_READ_DEV_PROPERTY:
 		MODS_IOCTL(MODS_ESC_READ_DEV_PROPERTY,
@@ -2476,11 +2503,6 @@ static long mods_krnl_ioctl(struct file  *fp,
 	case MODS_ESC_MAP_INTERRUPT:
 		MODS_IOCTL(MODS_ESC_MAP_INTERRUPT,
 				esc_mods_map_irq, MODS_DT_INFO);
-		break;
-
-	case MODS_ESC_MAP_GPIO:
-		MODS_IOCTL(MODS_ESC_MAP_GPIO,
-		esc_mods_map_irq_to_gpio, MODS_GPIO_INFO);
 		break;
 #endif
 

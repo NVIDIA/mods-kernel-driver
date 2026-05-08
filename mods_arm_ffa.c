@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* SPDX-FileCopyrightText: Copyright (c) 2022-2024, NVIDIA CORPORATION.  All rights reserved. */
+/* SPDX-FileCopyrightText: Copyright (c) 2022-2026, NVIDIA CORPORATION.  All rights reserved. */
 
 #include "mods_internal.h"
 #include <linux/uuid.h>
@@ -34,18 +34,21 @@ static int ffa_probe(struct ffa_device *ffa_dev)
 {
 	int ret = 0;
 
+#if KERNEL_VERSION(6, 1, 0) <= MODS_KERNEL_VERSION || defined(FFA_PARTITION_AARCH64_EXEC)
+	const struct ffa_msg_ops *ffa_ops = NULL;
+#else
+	const struct ffa_dev_ops *ffa_ops = NULL;
+#endif
+
 	mutex_lock(&mods_ffa_lock);
 
 #if KERNEL_VERSION(6, 1, 0) <= MODS_KERNEL_VERSION || defined(FFA_PARTITION_AARCH64_EXEC)
-	const struct ffa_msg_ops *ffa_ops = NULL;
-
 	if (ffa_dev->ops)
 		ffa_ops = ffa_dev->ops->msg_ops;
 #else
-	const struct ffa_dev_ops *ffa_ops;
-
 	ffa_ops = ffa_dev_ops_get(ffa_dev);
 #endif
+
 	if (!ffa_ops) {
 		mods_error_printk("failed \"method\" init: ffa\n");
 		mutex_unlock(&mods_ffa_lock);

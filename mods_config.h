@@ -1,34 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
-/* SPDX-FileCopyrightText: Copyright (c) 2008-2025, NVIDIA CORPORATION.  All rights reserved. */
+/* SPDX-FileCopyrightText: Copyright (c) 2008-2026, NVIDIA CORPORATION.  All rights reserved. */
 
 #ifndef _MODS_CONFIG_H_
 #define _MODS_CONFIG_H_
 
 #define MODS_KERNEL_VERSION LINUX_VERSION_CODE
-
-#if KERNEL_VERSION(2, 6, 30) <= MODS_KERNEL_VERSION && \
-	KERNEL_VERSION(4, 16, 0) > MODS_KERNEL_VERSION && \
-	defined(CONFIG_X86)
-#       define MODS_HAS_DMA_OPS 1
-#endif
-
-#if KERNEL_VERSION(2, 6, 30) > MODS_KERNEL_VERSION
-#       define MODS_HASNT_PCI_RESCAN_BUS 1
-#endif
-
-#if KERNEL_VERSION(2, 6, 31) <= MODS_KERNEL_VERSION
-#       define MODS_HAS_IORESOURCE_MEM_64 1
-#endif
-
-#if KERNEL_VERSION(2, 6, 33) <= MODS_KERNEL_VERSION
-#       define MODS_HAS_NEW_ACPI_WALK 1
-#else
-#       define MODS_HASNT_NUMA_NO_NODE 1
-#endif
-
-#if KERNEL_VERSION(2, 6, 34) <= MODS_KERNEL_VERSION
-#       define MODS_HAS_SET_COHERENT_MASK 1
-#endif
 
 #if KERNEL_VERSION(2, 6, 38) <= MODS_KERNEL_VERSION
 #       if defined(CONFIG_X86)
@@ -79,8 +55,16 @@
 #       define MODS_HAS_PGPROT_DECRYPTED
 #endif
 
+#if KERNEL_VERSION(4, 16, 0) > MODS_KERNEL_VERSION && defined(CONFIG_X86)
+#       define MODS_HAS_DMA_OPS 1
+#endif
+
 #if KERNEL_VERSION(4, 16, 0) <= MODS_KERNEL_VERSION
 #       define MODS_HAS_POLL_T 1
+#endif
+
+#if KERNEL_VERSION(4, 19, 0) <= MODS_KERNEL_VERSION
+#       define MODS_HAS_PCI_RESET_BUS 1
 #endif
 
 #if defined(CONFIG_ACPI_NUMA) && KERNEL_VERSION(5, 1, 0) <= MODS_KERNEL_VERSION
@@ -109,8 +93,14 @@
 #       define MODS_HAS_FB_SET_SUSPEND 1
 #endif
 
-#if KERNEL_VERSION(5, 4, 184) <= MODS_KERNEL_VERSION && defined(CONFIG_HAVE_ARM_SMCCC)
+#if KERNEL_VERSION(5, 4, 184) <= MODS_KERNEL_VERSION && \
+	defined(CONFIG_HAVE_ARM_SMCCC) && \
+	defined(CONFIG_ARM64)
 #       define MODS_HAS_ARM_SMCCC 1
+#endif
+
+#if defined(CONFIG_X86) && KERNEL_VERSION(7, 0, 0) <= MODS_KERNEL_VERSION
+#       define MODS_HAS_SYSFB_SCREEN_INFO 1
 #endif
 
 #ifndef IS_BUILTIN

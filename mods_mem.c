@@ -60,6 +60,8 @@ static bool validate_mem_handle(struct mods_client   *client,
 static u64 client_bit(struct mods_client *client)
 {
 	WARN_ON(client->client_id == 0 || client->client_id > MODS_MAX_CLIENTS);
+	if (client->client_id == 0 || client->client_id > MODS_MAX_CLIENTS)
+		return 0;
 	return client->client_id - 1;
 }
 
@@ -570,8 +572,7 @@ static void save_non_wb_chunks(struct mods_client   *client,
 		if (!is_chunk_wc(p_mem_info, ichunk))
 			continue;
 
-		free_chunk = kzalloc(sizeof(struct MODS_FREE_PHYS_CHUNK),
-				     GFP_KERNEL | __GFP_NORETRY);
+		free_chunk = MODS_ZALLOC(*free_chunk);
 
 		if (unlikely(!free_chunk))
 			break;
@@ -629,10 +630,11 @@ static int restore_cache_one_chunk(struct page *p_page, u8 order)
 		void *ptr = MODS_KMAP(p_page);
 		int   err = -ENOMEM;
 
-		if (likely(ptr))
+		if (likely(ptr)) {
 			err = MODS_SET_MEMORY_WB((unsigned long)ptr, num_pages);
 
-		MODS_KUNMAP(ptr);
+			MODS_KUNMAP(ptr);
+		}
 
 		if (likely(!final_err))
 			final_err = err;
@@ -1588,11 +1590,7 @@ int esc_mods_alloc_pages_2(struct mods_client        *client,
 	p_mem_info->decrypted_mmap  = (p->flags & MODS_ALLOC_DECRYPTED_MMAP) ? true : false;
 #endif
 	p_mem_info->reservation_tag = 0;
-#ifdef MODS_HASNT_NUMA_NO_NODE
-	p_mem_info->numa_node       = numa_node_id();
-#else
 	p_mem_info->numa_node       = NUMA_NO_NODE;
-#endif
 	p_mem_info->dev             = NULL;
 
 	if ((p->flags & MODS_ALLOC_USE_NUMA) && p->numa_node != MODS_ANY_NUMA_NODE)

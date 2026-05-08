@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-only WITH Linux-syscall-note */
-/* SPDX-FileCopyrightText: Copyright (c) 2008-2025, NVIDIA CORPORATION.  All rights reserved. */
+/* SPDX-FileCopyrightText: Copyright (c) 2008-2026, NVIDIA CORPORATION.  All rights reserved. */
 
 #ifndef _UAPI_MODS_H_
 #define _UAPI_MODS_H_
@@ -8,7 +8,7 @@
 
 /* Driver version */
 #define MODS_DRIVER_VERSION_MAJOR 4
-#define MODS_DRIVER_VERSION_MINOR 34
+#define MODS_DRIVER_VERSION_MINOR 35
 #define MODS_DRIVER_VERSION ((MODS_DRIVER_VERSION_MAJOR << 8) | \
 			     ((MODS_DRIVER_VERSION_MINOR / 10) << 4) | \
 			     (MODS_DRIVER_VERSION_MINOR % 10))
@@ -2270,5 +2270,6 @@ struct MODS_SET_QUAL_MODE {
 #define MODS_ESC_SET_CACHE_ATTR MODSIO(W, 151, MODS_SET_CACHE_ATTR)
 #define MODS_ESC_SHARE_ALLOCATION MODSIO(W, 152, MODS_RESERVE_ALLOCATION)
 #define MODS_ESC_SET_QUAL_MODE MODSIO(W, 153, MODS_SET_QUAL_MODE)
+#define MODS_ESC_PCI_RESET_BUS MODSIO(W, 154, mods_pci_dev_2)
 
 #endif /* _UAPI_MODS_H_  */
