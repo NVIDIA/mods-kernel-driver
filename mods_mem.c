@@ -57,6 +57,17 @@ static bool validate_mem_handle(struct mods_client   *client,
 	return false;
 }
 
+static bool alloc_is_mapped(struct mods_client *client, struct MODS_MEM_INFO *p_mem_info)
+{
+	struct SYS_MAP_MEMORY *p_map_mem;
+
+	list_for_each_entry(p_map_mem, &client->mem_map_list, list)
+		if (p_map_mem->p_mem_info == p_mem_info)
+			return true;
+
+	return false;
+}
+
 static u64 client_bit(struct mods_client *client)
 {
 	WARN_ON(client->client_id == 0 || client->client_id > MODS_MAX_CLIENTS);
@@ -1173,12 +1184,6 @@ static int get_addr_range(struct mods_client                 *client,
 
 	p->physical_address = 0;
 
-	p_mem_info = get_mem_handle(client, p->memory_handle);
-	if (unlikely(!p_mem_info)) {
-		LOG_EXT();
-		return -EINVAL;
-	}
-
 	if (unlikely(pcidev && (pcidev->bus > 0xFFU ||
 				pcidev->device > 0xFFU))) {
 		cl_error("dev %04x:%02x:%02x.%x not found\n",
@@ -1190,13 +1195,17 @@ static int get_addr_range(struct mods_client                 *client,
 		return -EINVAL;
 	}
 
-	sg         = p_mem_info->sg;
-	num_chunks = get_num_chunks(p_mem_info);
-
 	err = mutex_lock_interruptible(&client->mtx);
 	if (err) {
 		LOG_EXT();
 		return err;
+	}
+
+	p_mem_info = get_mem_handle(client, p->memory_handle);
+	if (unlikely(!p_mem_info)) {
+		mutex_unlock(&client->mtx);
+		LOG_EXT();
+		return -EINVAL;
 	}
 
 	err = mutex_lock_interruptible(&mem_reservation_mtx);
@@ -1205,6 +1214,9 @@ static int get_addr_range(struct mods_client                 *client,
 		LOG_EXT();
 		return err;
 	}
+
+	sg         = p_mem_info->sg;
+	num_chunks = get_num_chunks(p_mem_info);
 
 	/* If pcidev was specified, retrieve IOVA,
 	 * otherwise retrieve physical address.
@@ -1390,16 +1402,19 @@ static u32 estimate_num_chunks(u32 num_pages)
 static inline size_t calc_mem_info_size_no_bitmap(u32 num_chunks)
 {
 	return sizeof(struct MODS_MEM_INFO) +
-	       num_chunks * sizeof(struct scatterlist);
+	       (size_t)num_chunks * sizeof(struct scatterlist);
 }
 
 static inline size_t calc_mem_info_size(u32 num_chunks, u8 cache_type)
 {
-	size_t size = calc_mem_info_size_no_bitmap(num_chunks);
+	const size_t bitmap_size = sizeof(long) * BITS_TO_LONGS(num_chunks);
+	const size_t max_chunks  = (~(size_t)0 - sizeof(struct MODS_MEM_INFO) - bitmap_size) /
+				   sizeof(struct scatterlist);
 
-	size += sizeof(long) * BITS_TO_LONGS(num_chunks);
+	if (unlikely((size_t)num_chunks > max_chunks))
+		return 0;
 
-	return size;
+	return calc_mem_info_size_no_bitmap(num_chunks) + bitmap_size;
 }
 
 static void init_mem_info(struct MODS_MEM_INFO *p_mem_info,
@@ -1426,6 +1441,9 @@ static struct MODS_MEM_INFO *alloc_mem_info(struct mods_client *client,
 	struct MODS_MEM_INFO *p_mem_info = NULL;
 
 	const size_t calc_size = calc_mem_info_size(num_chunks, cache_type);
+
+	if (unlikely(!calc_size))
+		return NULL;
 
 	*alloc_size = calc_size;
 
@@ -1819,8 +1837,14 @@ int esc_mods_free_pages(struct mods_client *client, struct MODS_FREE_PAGES *p)
 
 	p_mem_info = get_mem_handle(client, p->memory_handle);
 
-	if (likely(p_mem_info))
-		err = unregister_and_free_alloc(client, p_mem_info);
+	if (likely(p_mem_info)) {
+		if (unlikely(!p_mem_info->shared && alloc_is_mapped(client, p_mem_info))) {
+			cl_error("cannot free memory handle 0x%llx: still mapped\n",
+				 (unsigned long long)p->memory_handle);
+			err = -EBUSY;
+		} else
+			err = unregister_and_free_alloc(client, p_mem_info);
+	}
 
 	mutex_unlock(&mem_reservation_mtx);
 	mutex_unlock(&client->mtx);
@@ -2244,8 +2268,15 @@ int esc_mods_get_mapped_phys_addr(struct mods_client               *client,
 
 	LOG_ENT();
 
+	err = mutex_lock_interruptible(&client->mtx);
+	if (unlikely(err)) {
+		LOG_EXT();
+		return err;
+	}
+
 	p_mem_info = get_mem_handle(client, p->memory_handle);
 	if (unlikely(!p_mem_info)) {
+		mutex_unlock(&client->mtx);
 		LOG_EXT();
 		return -EINVAL;
 	}
@@ -2254,17 +2285,15 @@ int esc_mods_get_mapped_phys_addr(struct mods_client               *client,
 	range.offset        = p->offset;
 
 	if (p_mem_info->dev) {
-		range.pci_device.domain   =
-			pci_domain_nr(p_mem_info->dev->bus);
-		range.pci_device.bus	   =
-			p_mem_info->dev->bus->number;
-		range.pci_device.device   =
-			PCI_SLOT(p_mem_info->dev->devfn);
-		range.pci_device.function =
-			PCI_FUNC(p_mem_info->dev->devfn);
+		range.pci_device.domain   = pci_domain_nr(p_mem_info->dev->bus);
+		range.pci_device.bus      = p_mem_info->dev->bus->number;
+		range.pci_device.device   = PCI_SLOT(p_mem_info->dev->devfn);
+		range.pci_device.function = PCI_FUNC(p_mem_info->dev->devfn);
 
+		mutex_unlock(&client->mtx);
 		err = get_addr_range(client, &range, &range.pci_device);
 	} else {
+		mutex_unlock(&client->mtx);
 		memset(&range.pci_device, 0, sizeof(range.pci_device));
 		err = get_addr_range(client, &range, NULL);
 	}
@@ -2513,14 +2542,19 @@ int esc_mods_dma_map_memory(struct mods_client         *client,
 
 	LOG_ENT();
 
-	p_mem_info = get_mem_handle(client, p->memory_handle);
-	if (unlikely(!p_mem_info))
-		goto failed;
-	shared = p_mem_info->shared;
-
 	err = mutex_lock_interruptible(&client->mtx);
 	if (unlikely(err))
 		goto failed;
+
+	p_mem_info = get_mem_handle(client, p->memory_handle);
+	if (unlikely(!p_mem_info)) {
+		mutex_unlock(&client->mtx);
+		err = -EINVAL;
+		goto failed;
+	}
+
+	shared = p_mem_info->shared;
+
 	if (shared) {
 		err = mutex_lock_interruptible(&mem_reservation_mtx);
 		if (unlikely(err)) {
@@ -2603,10 +2637,6 @@ int esc_mods_dma_unmap_memory(struct mods_client         *client,
 
 	LOG_ENT();
 
-	p_mem_info = get_mem_handle(client, p->memory_handle);
-	if (unlikely(!p_mem_info))
-		goto failed;
-
 	err = mods_find_pci_dev(client, &p->pci_device, &dev);
 	if (unlikely(err)) {
 		if (err == -ENODEV)
@@ -2621,6 +2651,14 @@ int esc_mods_dma_unmap_memory(struct mods_client         *client,
 	err = mutex_lock_interruptible(&client->mtx);
 	if (unlikely(err))
 		goto failed;
+
+	p_mem_info = get_mem_handle(client, p->memory_handle);
+	if (unlikely(!p_mem_info)) {
+		mutex_unlock(&client->mtx);
+		err = -EINVAL;
+		goto failed;
+	}
+
 	if (p_mem_info->shared) {
 		err = mutex_lock_interruptible(&mem_reservation_mtx);
 		if (unlikely(err)) {
@@ -2665,12 +2703,20 @@ int esc_mods_iommu_dma_map_memory(struct mods_client               *client,
 	if (!(p->flags & MODS_IOMMU_MAP_CONTIGUOUS))
 		cl_error("contiguous flag not set\n");
 
-	p_mem_info = get_mem_handle(client, p->memory_handle);
-	if (unlikely(!p_mem_info || p_mem_info->shared))
+	err = mutex_lock_interruptible(&client->mtx);
+	if (unlikely(err))
 		goto failed;
+	locked = true;
+
+	p_mem_info = get_mem_handle(client, p->memory_handle);
+	if (unlikely(!p_mem_info || p_mem_info->shared)) {
+		err = -EINVAL;
+		goto failed;
+	}
 
 	if (!list_empty(&p_mem_info->dma_map_list)) {
 		cl_error("smmu is already mapped\n");
+		err = -EINVAL;
 		goto failed;
 	}
 
@@ -2682,11 +2728,6 @@ int esc_mods_iommu_dma_map_memory(struct mods_client               *client,
 		err = -ENODEV;
 		goto failed;
 	}
-
-	err = mutex_lock_interruptible(&client->mtx);
-	if (unlikely(err))
-		goto failed;
-	locked = true;
 
 	/* do smmu mapping */
 	err = create_dma_map(client, p_mem_info, NULL, smmu_pdev->dev);
@@ -2741,19 +2782,24 @@ int esc_mods_iommu_dma_unmap_memory(struct mods_client               *client,
 
 	LOG_ENT();
 
-	p_mem_info = get_mem_handle(client, p->memory_handle);
-	if (unlikely(!p_mem_info || p_mem_info->shared))
+	err = mutex_lock_interruptible(&client->mtx);
+	if (unlikely(err))
 		goto failed;
+
+	p_mem_info = get_mem_handle(client, p->memory_handle);
+	if (unlikely(!p_mem_info || p_mem_info->shared)) {
+		mutex_unlock(&client->mtx);
+		err = -EINVAL;
+		goto failed;
+	}
 
 	if (!list_is_singular(&p_mem_info->dma_map_list)) {
 		cl_error("smmu buffer is not mapped, handle=0x%llx\n",
 			 (unsigned long long)p_mem_info);
+		mutex_unlock(&client->mtx);
+		err = -EINVAL;
 		goto failed;
 	}
-
-	err = mutex_lock_interruptible(&client->mtx);
-	if (unlikely(err))
-		goto failed;
 
 	p_dma_map = list_first_entry(&p_mem_info->dma_map_list,
 				     struct MODS_DMA_MAP,

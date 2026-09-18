@@ -810,17 +810,29 @@ static int mods_free_irqs(struct mods_client *client,
 
 void mods_free_client_interrupts(struct mods_client *client)
 {
-	struct list_head *head = &client->enabled_devices;
-	struct list_head *iter;
+	struct list_head    *head = &client->enabled_devices;
+	struct list_head    *iter;
 	struct en_dev_entry *dpriv;
+	struct dev_irq_map  *del;
+	struct dev_irq_map  *next;
 
 	LOG_ENT();
 
-	/* Release all interrupts */
+	/* Release all PCI-device interrupts */
 	list_for_each(iter, head) {
 		dpriv = list_entry(iter, struct en_dev_entry, list);
 		mods_free_irqs(client, dpriv->dev);
 	}
+
+	/* Release any remaining CPU interrupts */
+	mutex_lock(&irq_mtx);
+	list_for_each_entry_safe(del, next, &client->irq_list, list) {
+		if (!del->dev) {
+			list_del(&del->list);
+			free_irq_map(client, del);
+		}
+	}
+	mutex_unlock(&irq_mtx);
 
 	LOG_EXT();
 }

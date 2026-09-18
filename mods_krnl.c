@@ -500,6 +500,7 @@ static struct mods_client *alloc_client(void)
 			INIT_LIST_HEAD(&client->enabled_devices);
 			INIT_LIST_HEAD(&client->mem_map_list);
 			INIT_LIST_HEAD(&client->free_mem_list);
+			INIT_LIST_HEAD(&client->pci_res_map_list);
 
 			LOG_EXT();
 			return client;
@@ -767,16 +768,26 @@ MODULE_DESCRIPTION("NVIDIA diagnostic driver");
 
 #define STRING_VALUE(x) #x
 #define MAKE_MODULE_VERSION(x, y) STRING_VALUE(x) "." STRING_VALUE(y)
-MODULE_VERSION(MAKE_MODULE_VERSION(MODS_DRIVER_VERSION_MAJOR,
-				   MODS_DRIVER_VERSION_MINOR));
+MODULE_VERSION(MAKE_MODULE_VERSION(MODS_DRIVER_VERSION_MAJOR, MODS_DRIVER_VERSION_MINOR));
+
+#if PAGE_SIZE == 4096
+#define MODS_PAGE_SIZE_STR "4096"
+#elif PAGE_SIZE == 16384
+#define MODS_PAGE_SIZE_STR "16384"
+#elif PAGE_SIZE == 65536
+#define MODS_PAGE_SIZE_STR "65536"
+#else
+#define MODS_PAGE_SIZE_STR __stringify(PAGE_SIZE)
+#endif
+
+MODULE_INFO(pagesize, MODS_PAGE_SIZE_STR);
 
 module_param(debug, int, 0644);
 MODULE_PARM_DESC(debug,
-	"debug bitflags (2=ioctl 4=pci 8=acpi 16=irq 32=mem 64=fun +256=detailed)");
+		 "debug bitflags (2=ioctl 4=pci 8=acpi 16=irq 32=mem 64=fun +256=detailed)");
 
 module_param(multi_instance, int, 0644);
-MODULE_PARM_DESC(multi_instance,
-	"allows more than one client to simultaneously open the driver");
+MODULE_PARM_DESC(multi_instance, "allows more than one client to simultaneously open the driver");
 
 #if defined(MODS_HAS_ARM_SMCCC)
 module_param(force_qual_mode, int, 0644);
@@ -893,6 +904,11 @@ static int get_prot_for_range(struct mods_client *client,
 	const phys_addr_t req_end     = phys_addr + size;
 	const phys_addr_t range_begin = client->mem_type.phys_addr;
 	const phys_addr_t range_end   = range_begin + client->mem_type.size;
+
+	if (unlikely(req_end < phys_addr || range_end < range_begin)) {
+		cl_error("mmap range overflow\n");
+		return -EINVAL;
+	}
 
 	/* Check overlap with set memory type range */
 	if (phys_addr < range_end && req_end > range_begin) {
@@ -1207,6 +1223,10 @@ static int mods_krnl_close(struct inode *ip, struct file *fp)
 	/* All memory mappings should be gone before close */
 	if (unlikely(!list_empty(&client->mem_map_list)))
 		cl_error("not all memory mappings have been freed\n");
+
+#if defined(CONFIG_PCI) && defined(MODS_HAS_DMA_MAP_RESOURCE)
+	mods_free_pci_res_maps(client);
+#endif
 
 	err = mods_unregister_all_alloc(client);
 	if (err)
@@ -2109,6 +2129,7 @@ static int esc_mods_get_driver_stats(struct mods_client *client,
 	p->version    = MODS_DRIVER_STATS_VERSION;
 	p->num_allocs = (num_allocs < 0) ? ~0U : num_allocs;
 	p->num_pages  = (num_pages  < 0) ? ~0U : num_pages;
+	p->page_size  = PAGE_SIZE;
 
 	LOG_EXT();
 	return 0;
@@ -2284,6 +2305,20 @@ static long mods_krnl_ioctl(struct file  *fp,
 				    esc_mods_pci_write_2,
 				    MODS_PCI_WRITE_2);
 		break;
+
+#ifdef MODS_HAS_DMA_MAP_RESOURCE
+	case MODS_ESC_PCI_MAP_RESOURCE:
+		MODS_IOCTL(MODS_ESC_PCI_MAP_RESOURCE,
+			   esc_mods_pci_map_resource,
+			   MODS_PCI_MAP_RESOURCE);
+		break;
+
+	case MODS_ESC_PCI_UNMAP_RESOURCE:
+		MODS_IOCTL(MODS_ESC_PCI_UNMAP_RESOURCE,
+			   esc_mods_pci_unmap_resource,
+			   MODS_PCI_UNMAP_RESOURCE);
+		break;
+#endif
 
 	case MODS_ESC_PCI_BUS_RESCAN:
 		MODS_IOCTL_NORETVAL(MODS_ESC_PCI_BUS_RESCAN,

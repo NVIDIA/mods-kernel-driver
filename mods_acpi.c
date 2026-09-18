@@ -368,11 +368,20 @@ static int mods_eval_acpi_method(struct mods_client           *client,
 			break;
 		}
 		case ACPI_MODS_TYPE_BUFFER: {
+			const __u32 offs = p->argument[i].buffer.offset;
+			const __u32 blen = p->argument[i].buffer.length;
+
+			if (blen > ACPI_MAX_BUFFER_LENGTH ||
+			    offs > ACPI_MAX_BUFFER_LENGTH - blen) {
+				cl_error("ACPI: buffer arg %u out of range (offset=%u length=%u)\n",
+					 i, offs, blen);
+				pci_dev_put(dev);
+				LOG_EXT();
+				return -EINVAL;
+			}
 			acpi_params[i].buffer.type = ACPI_TYPE_BUFFER;
-			acpi_params[i].buffer.length
-				= p->argument[i].buffer.length;
-			acpi_params[i].buffer.pointer
-				= p->in_buffer + p->argument[i].buffer.offset;
+			acpi_params[i].buffer.length = blen;
+			acpi_params[i].buffer.pointer = p->in_buffer + offs;
 			break;
 		}
 		case ACPI_MODS_TYPE_METHOD: {

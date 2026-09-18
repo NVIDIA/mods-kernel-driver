@@ -94,6 +94,7 @@ struct mods_client {
 	struct list_head         mem_map_list;
 	struct list_head         free_mem_list; /* unused UC/WC chunks */
 	struct list_head         enabled_devices;
+	struct list_head         pci_res_map_list; /* list of cross-device peer BAR mappings */
 	wait_queue_head_t        interrupt_event;
 	struct irq_q_info        irq_queue;
 	spinlock_t               irq_lock;
@@ -136,6 +137,20 @@ struct MODS_DMA_MAP {
 					* in sg array in MODS_MEM_INFO at the
 					* same index
 					*/
+};
+
+/* Cross-device peer BAR mapping information */
+struct mods_pci_res_map_info {
+	struct list_head   list;
+	struct pci_dev    *local_dev;      /* Local PCI device into whose IOMMU
+					    * the remote peer's BAR has been
+					    * mapped; this device originates the
+					    * DMA accesses through dma_addr.
+					    */
+	dma_addr_t         dma_addr;
+	phys_addr_t        phys_addr;
+	size_t             size;
+	u32                bar_index;
 };
 
 /* system memory allocation tracking */
@@ -531,6 +546,13 @@ int esc_mods_pci_reset_bus(struct mods_client    *client,
 #ifdef MODS_HAS_DEV_PROPS
 int esc_mods_read_dev_property(struct mods_client            *client,
 			       struct MODS_READ_DEV_PROPERTY *p);
+#endif
+#ifdef MODS_HAS_DMA_MAP_RESOURCE
+int esc_mods_pci_map_resource(struct mods_client           *client,
+			      struct MODS_PCI_MAP_RESOURCE *p);
+int esc_mods_pci_unmap_resource(struct mods_client             *client,
+				struct MODS_PCI_UNMAP_RESOURCE *p);
+void mods_free_pci_res_maps(struct mods_client *client);
 #endif
 #endif
 /* irq */

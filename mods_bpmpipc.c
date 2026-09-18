@@ -314,6 +314,8 @@ static void bpmp_ipc_channel_uninit(struct bpmp_ipc_ch *bpmp_ipc_ch)
 	tegra_ivc_cleanup(&bpmp_ipc_ch->ivc);
 }
 
+static void mods_bpmpipc_cleanup_locked(void);
+
 int mods_bpmpipc_init(struct mods_client *client,
 		      u64 db_phys_addr,
 		      u64 req_phys_addr,
@@ -326,7 +328,7 @@ int mods_bpmpipc_init(struct mods_client *client,
 		    mods_bpmp_ch.req_phys_addr == req_phys_addr &&
 		    mods_bpmp_ch.resp_phys_addr == resp_phys_addr)
 			return OK;
-		mods_bpmpipc_cleanup();
+		mods_bpmpipc_cleanup_locked();
 	}
 
 	err = bpmp_ioremap(client,
@@ -349,7 +351,7 @@ int mods_bpmpipc_init(struct mods_client *client,
 	return err;
 }
 
-void mods_bpmpipc_cleanup(void)
+static void mods_bpmpipc_cleanup_locked(void)
 {
 	if (!mods_bpmp_ch.is_init)
 		return;
@@ -357,6 +359,13 @@ void mods_bpmpipc_cleanup(void)
 	bpmp_ipc_channel_uninit(&mods_bpmp_ch);
 	bpmp_iounmap(&mods_bpmp_ch);
 	mods_bpmp_ch.is_init = false;
+}
+
+void mods_bpmpipc_cleanup(void)
+{
+	mutex_lock(&mods_bpmpipc_lock);
+	mods_bpmpipc_cleanup_locked();
+	mutex_unlock(&mods_bpmpipc_lock);
 }
 
 int esc_mods_bpmp_uphy_lane_eom_scan(struct mods_client *client,

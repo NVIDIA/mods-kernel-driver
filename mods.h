@@ -8,7 +8,7 @@
 
 /* Driver version */
 #define MODS_DRIVER_VERSION_MAJOR 4
-#define MODS_DRIVER_VERSION_MINOR 35
+#define MODS_DRIVER_VERSION_MINOR 36
 #define MODS_DRIVER_VERSION ((MODS_DRIVER_VERSION_MAJOR << 8) | \
 			     ((MODS_DRIVER_VERSION_MINOR / 10) << 4) | \
 			     (MODS_DRIVER_VERSION_MINOR % 10))
@@ -637,23 +637,25 @@ struct MODS_SET_NUM_VF {
 	__u32                 numvfs;  /* Number of virtual functions */
 };
 
-/* Used by legacy MODS_ESC_PCI_MAP_RESOURCE ioctl */
+/* Used by MODS_ESC_PCI_MAP_RESOURCE ioctl. */
 struct MODS_PCI_MAP_RESOURCE {
 	/* IN */
 	struct mods_pci_dev_2 local_pci_device;
 	struct mods_pci_dev_2 remote_pci_device;
-	__u32                 resource_index;
+	__u32                 bar_index; /* Logical BAR index (see MODS_PCI_GET_BAR_INFO_2) */
+	__u32                 padding;
 	__u64                 page_count;
+	__u64                 physical_address; /* peer BAR physical address */
 
-	/* IN/OUT */
-	__u64                 va;
+	/* OUT */
+	__u64                 iova;             /* mapped IO virtual (DMA) address */
 };
 
-/* Used by legacy MODS_ESC_PCI_UNMAP_RESOURCE ioctl */
+/* Used by MODS_ESC_PCI_UNMAP_RESOURCE ioctl. */
 struct MODS_PCI_UNMAP_RESOURCE {
 	/* IN */
 	struct mods_pci_dev_2 pci_device;
-	__u64                 va;
+	__u64                 iova; /* IOVA returned by MAP_RESOURCE */
 };
 
 /* Used by MODS_ESC_PIO_READ ioctl.
@@ -1428,7 +1430,8 @@ struct MODS_GET_DRIVER_STATS {
 	__u64 version;
 	__u64 num_allocs;
 	__u64 num_pages;
-	__u64 reserved[13];
+	__u64 page_size;
+	__u64 reserved[12];
 };
 
 #define MAX_CLOCK_HANDLE_NAME 64
@@ -2163,9 +2166,7 @@ struct MODS_SET_QUAL_MODE {
 /* Deprecated */
 #define MODS_ESC_GET_MAPPED_PHYSICAL_ADDRESS_2 MODSIO(WR, 77, \
 						MODS_GET_PHYSICAL_ADDRESS_2)
-/* Deprecated */
 #define MODS_ESC_PCI_MAP_RESOURCE MODSIO(WR, 78, MODS_PCI_MAP_RESOURCE)
-/* Deprecated */
 #define MODS_ESC_PCI_UNMAP_RESOURCE MODSIO(W, 79, MODS_PCI_UNMAP_RESOURCE)
 #define MODS_ESC_DMA_REQUEST_HANDLE MODSIO(R,  80, MODS_DMA_HANDLE)
 #define MODS_ESC_DMA_REQUEST_HANDLE_2 MODSIO(R,  80, MODS_DMA_HANDLE_2)

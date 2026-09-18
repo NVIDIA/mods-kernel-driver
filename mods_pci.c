@@ -215,12 +215,35 @@ int esc_mods_find_pci_class_code(struct mods_client              *client,
 	return err;
 }
 
+static int pci_bar_index_to_resource(struct pci_dev *dev,
+				     u32             bar_index,
+				     unsigned int   *bar_resource_offset)
+{
+	unsigned int i;
+
+	*bar_resource_offset = 0;
+	for (i = 0; i < bar_index; i++) {
+		if (unlikely(*bar_resource_offset >= PCI_NUM_RESOURCES))
+			return -EINVAL;
+
+		if (pci_resource_flags(dev, *bar_resource_offset) &
+		    IORESOURCE_MEM_64)
+			*bar_resource_offset += 2;
+		else
+			*bar_resource_offset += 1;
+	}
+
+	if (unlikely(*bar_resource_offset >= PCI_NUM_RESOURCES))
+		return -EINVAL;
+
+	return 0;
+}
+
 int esc_mods_pci_get_bar_info_2(struct mods_client             *client,
 				struct MODS_PCI_GET_BAR_INFO_2 *p)
 {
 	struct pci_dev *dev;
 	unsigned int    bar_resource_offset;
-	unsigned int    i;
 	int             err;
 
 	LOG_ENT();
@@ -239,28 +262,14 @@ int esc_mods_pci_get_bar_info_2(struct mods_client             *client,
 		 p->pci_device.function,
 		 p->bar_index);
 
-	bar_resource_offset = 0;
-	for (i = 0; i < p->bar_index; i++) {
-		if (unlikely(bar_resource_offset >= PCI_NUM_RESOURCES)) {
-			cl_error("invalid pci bar index %u\n", p->bar_index);
-			err = -EINVAL;
-			goto error;
-		}
-
-		if (pci_resource_flags(dev, bar_resource_offset) & IORESOURCE_MEM_64)
-			bar_resource_offset += 2;
-		else
-			bar_resource_offset += 1;
-	}
-
-	if (bar_resource_offset < PCI_NUM_RESOURCES) {
-		p->base_address = pci_resource_start(dev, bar_resource_offset);
-		p->bar_size     = pci_resource_len(dev, bar_resource_offset);
-		err = 0;
-	} else {
+	err = pci_bar_index_to_resource(dev, p->bar_index, &bar_resource_offset);
+	if (unlikely(err)) {
 		cl_error("invalid pci bar index %u\n", p->bar_index);
-		err = -EINVAL;
+		goto error;
 	}
+
+	p->base_address = pci_resource_start(dev, bar_resource_offset);
+	p->bar_size     = pci_resource_len(dev, bar_resource_offset);
 
 error:
 	pci_dev_put(dev);
@@ -1188,5 +1197,313 @@ error:
 	pci_dev_put(dev);
 	LOG_EXT();
 	return err;
+}
+#endif
+
+#ifdef MODS_HAS_DMA_MAP_RESOURCE
+
+static bool check_bar_mapping(const struct mods_pci_res_map_info *existing,
+			      const struct pci_dev *local_dev,
+			      phys_addr_t phys_addr,
+			      size_t size)
+{
+	phys_addr_t existing_end;
+	phys_addr_t new_end;
+
+	if (existing->local_dev != local_dev)
+		return false;
+
+	existing_end = existing->phys_addr + existing->size;
+	new_end      = phys_addr + size;
+
+	/* [phys_addr, new_end) overlaps [existing->phys_addr, existing_end) */
+	return phys_addr < existing_end && existing->phys_addr < new_end;
+}
+
+int esc_mods_pci_map_resource(struct mods_client    *client,
+			      struct MODS_PCI_MAP_RESOURCE *p)
+{
+	struct pci_dev               *local_dev  = NULL;
+	struct pci_dev               *remote_dev = NULL;
+	struct mods_pci_res_map_info *p_res_map  = NULL;
+	struct mods_pci_res_map_info *cur        = NULL;
+	unsigned int                  bar_resource_offset;
+	resource_size_t               bar_start;
+	resource_size_t               bar_size;
+	phys_addr_t                   phys_addr;
+	dma_addr_t                    dma_addr   = 0;
+	size_t                        size;
+	bool                          dma_mapped = false;
+	bool                          mtx_locked = false;
+	int                           err        = 0;
+
+	LOG_ENT();
+
+	/* Reject non-zero explicit padding so the field can be repurposed later. */
+	if (unlikely(p->padding)) {
+		cl_error("padding field must be zero\n");
+		LOG_EXT();
+		return -EINVAL;
+	}
+
+	/* Find both devices */
+	err = mods_find_pci_dev(client, &p->local_pci_device, &local_dev);
+	if (unlikely(err)) {
+		cl_error("local dev %04x:%02x:%02x.%x not found\n",
+			 p->local_pci_device.domain, p->local_pci_device.bus,
+			 p->local_pci_device.device, p->local_pci_device.function);
+		LOG_EXT();
+		return err;
+	}
+
+	err = mods_find_pci_dev(client, &p->remote_pci_device, &remote_dev);
+	if (unlikely(err)) {
+		cl_error("remote dev %04x:%02x:%02x.%x not found\n",
+			 p->remote_pci_device.domain, p->remote_pci_device.bus,
+			 p->remote_pci_device.device, p->remote_pci_device.function);
+		goto error;
+	}
+
+	if (unlikely(local_dev == remote_dev)) {
+		cl_error("local and remote PCI device cannot be the same (%04x:%02x:%02x.%x)\n",
+			 p->local_pci_device.domain,
+			 p->local_pci_device.bus,
+			 p->local_pci_device.device,
+			 p->local_pci_device.function);
+		err = -EINVAL;
+		goto error;
+	}
+
+	err = pci_bar_index_to_resource(remote_dev, p->bar_index, &bar_resource_offset);
+	if (unlikely(err)) {
+		cl_error("invalid BAR index %u\n", p->bar_index);
+		goto error;
+	}
+
+	/* P2P mapping only targets the remote device's standard BARs. */
+	if (unlikely(bar_resource_offset > PCI_STD_RESOURCE_END)) {
+		cl_error("BAR%u is not a standard BAR\n", p->bar_index);
+		err = -EINVAL;
+		goto error;
+	}
+
+	bar_start = pci_resource_start(remote_dev, bar_resource_offset);
+	bar_size  = pci_resource_len(remote_dev, bar_resource_offset);
+
+	if (unlikely(!bar_size)) {
+		cl_error("invalid BAR size for BAR%u\n", p->bar_index);
+		err = -EINVAL;
+		goto error;
+	}
+
+	if (unlikely(!(pci_resource_flags(remote_dev, bar_resource_offset) &
+		       IORESOURCE_MEM))) {
+		cl_error("BAR%u of remote dev is not a memory BAR\n", p->bar_index);
+		err = -EINVAL;
+		goto error;
+	}
+
+	if (unlikely(!p->page_count)) {
+		cl_error("page_count must be non-zero\n");
+		err = -EINVAL;
+		goto error;
+	}
+
+	size = (size_t)p->page_count * PAGE_SIZE;
+	if (unlikely(size / PAGE_SIZE != p->page_count)) {
+		cl_error("page_count overflow\n");
+		err = -EINVAL;
+		goto error;
+	}
+
+	if (unlikely(p->physical_address + size < p->physical_address ||
+		     p->physical_address < bar_start ||
+		     p->physical_address + size > bar_start + bar_size)) {
+		cl_error("range [0x%llx, 0x%llx) outside BAR%u [0x%llx, 0x%llx)\n",
+			 (u64)p->physical_address,
+			 (u64)(p->physical_address + size),
+			 p->bar_index,
+			 bar_start,
+			 bar_start + bar_size);
+		err = -EINVAL;
+		goto error;
+	}
+
+	phys_addr = (phys_addr_t)p->physical_address;
+
+	/*
+	 * Allocate the tracking entry and perform the IOMMU mapping *outside*
+	 * the client mutex. Both kzalloc(GFP_KERNEL) and dma_map_resource()
+	 * can sleep (memory reclaim, IOMMU page-table updates, etc.), and we
+	 * don't want to block other clients holding client->mtx during those
+	 * operations.
+	 */
+	p_res_map = MODS_ZALLOC(*p_res_map);
+	if (unlikely(!p_res_map)) {
+		err = -ENOMEM;
+		goto error;
+	}
+	atomic_inc(&client->num_allocs);
+
+	dma_addr = dma_map_resource(&local_dev->dev, phys_addr, size,
+				    DMA_BIDIRECTIONAL, 0);
+	if (unlikely(dma_mapping_error(&local_dev->dev, dma_addr))) {
+		cl_error("failed to map peer BAR PA into local device's IOMMU table\n");
+		err = -EIO;
+		goto error;
+	}
+	dma_mapped = true;
+
+	p_res_map->local_dev      = local_dev;
+	p_res_map->dma_addr       = dma_addr;
+	p_res_map->phys_addr      = phys_addr;
+	p_res_map->size           = size;
+	p_res_map->bar_index      = p->bar_index;
+
+	/* Mutex is held only for the conflict check + list insert. */
+	if (unlikely(mutex_lock_interruptible(&client->mtx))) {
+		err = -EINTR;
+		goto error;
+	}
+	mtx_locked = true;
+
+	list_for_each_entry(cur, &client->pci_res_map_list, list) {
+		if (unlikely(check_bar_mapping(cur, local_dev, phys_addr,
+					       size))) {
+			cl_error("new mapping [0x%llx, 0x%llx) for local dev %04x:%02x:%02x.%x conflicts with existing [0x%llx, 0x%llx)\n",
+				 (u64)phys_addr,
+				 (u64)(phys_addr + size),
+				 p->local_pci_device.domain,
+				 p->local_pci_device.bus,
+				 p->local_pci_device.device,
+				 p->local_pci_device.function,
+				 (u64)cur->phys_addr,
+				 (u64)(cur->phys_addr + cur->size));
+			err = -EEXIST;
+			goto error;
+		}
+	}
+
+	list_add(&p_res_map->list, &client->pci_res_map_list);
+	mutex_unlock(&client->mtx);
+	mtx_locked = false;
+
+	p->iova = (u64)(dma_addr); /* return IOVA to userspace */
+
+	cl_debug(DEBUG_PCI,
+		 "mapped BAR%u of %04x:%02x:%02x.%x (PA=0x%llx) into %04x:%02x:%02x.%x as IOVA=0x%llx, size=0x%zx\n",
+		 p->bar_index,
+		 p->remote_pci_device.domain, p->remote_pci_device.bus,
+		 p->remote_pci_device.device, p->remote_pci_device.function,
+		 (u64)phys_addr,
+		 p->local_pci_device.domain, p->local_pci_device.bus,
+		 p->local_pci_device.device, p->local_pci_device.function,
+		 (u64)dma_addr, size);
+
+	pci_dev_put(remote_dev);
+	remote_dev = NULL;
+	local_dev  = NULL;
+	p_res_map  = NULL;
+	dma_mapped = false; /* ownership transferred to p_res_map on the list */
+
+	LOG_EXT();
+	return 0;
+
+error:
+	if (mtx_locked)
+		mutex_unlock(&client->mtx);
+	if (dma_mapped)
+		dma_unmap_resource(&local_dev->dev, dma_addr, size,
+				   DMA_BIDIRECTIONAL, 0);
+	if (p_res_map)
+		atomic_dec(&client->num_allocs);
+	kfree(p_res_map);
+	if (remote_dev)
+		pci_dev_put(remote_dev);
+	if (local_dev)
+		pci_dev_put(local_dev);
+
+	LOG_EXT();
+	return err;
+}
+
+int esc_mods_pci_unmap_resource(struct mods_client    *client,
+				struct MODS_PCI_UNMAP_RESOURCE *p)
+{
+	struct pci_dev               *dev;
+	struct mods_pci_res_map_info *cur;
+	struct mods_pci_res_map_info *found = NULL;
+	int                           err;
+
+	LOG_ENT();
+
+	err = mods_find_pci_dev(client, &p->pci_device, &dev);
+	if (unlikely(err)) {
+		cl_error("dev %04x:%02x:%02x.%x not found\n",
+			 p->pci_device.domain, p->pci_device.bus,
+			 p->pci_device.device, p->pci_device.function);
+		LOG_EXT();
+		return err;
+	}
+
+	if (unlikely(mutex_lock_interruptible(&client->mtx))) {
+		pci_dev_put(dev);
+		LOG_EXT();
+		return -EINTR;
+	}
+
+	list_for_each_entry(cur, &client->pci_res_map_list, list) {
+		if (cur->local_dev == dev && cur->dma_addr == p->iova) {
+			found = cur;
+			list_del(&cur->list);
+			break;
+		}
+	}
+	mutex_unlock(&client->mtx);
+
+	if (unlikely(!found)) {
+		cl_error("no mapping at IOVA=0x%llx for dev %04x:%02x:%02x.%x\n",
+			 p->iova,
+			 p->pci_device.domain,
+			 p->pci_device.bus,
+			 p->pci_device.device,
+			 p->pci_device.function);
+		pci_dev_put(dev);
+		LOG_EXT();
+		return -EINVAL;
+	}
+
+	dma_unmap_resource(&dev->dev, found->dma_addr, found->size, DMA_BIDIRECTIONAL, 0);
+	pci_dev_put(found->local_dev);
+	kfree(found);
+	atomic_dec(&client->num_allocs);
+	pci_dev_put(dev);
+
+	LOG_EXT();
+	return 0;
+}
+
+void mods_free_pci_res_maps(struct mods_client *client)
+{
+	struct mods_pci_res_map_info *cur;
+
+	for (;;) {
+		mutex_lock(&client->mtx);
+		cur = list_first_entry_or_null(&client->pci_res_map_list,
+					       struct mods_pci_res_map_info,
+					       list);
+		if (cur)
+			list_del(&cur->list);
+		mutex_unlock(&client->mtx);
+
+		if (!cur)
+			break;
+
+		dma_unmap_resource(&cur->local_dev->dev, cur->dma_addr,
+				   cur->size, DMA_BIDIRECTIONAL, 0);
+		pci_dev_put(cur->local_dev);
+		kfree(cur);
+		atomic_dec(&client->num_allocs);
+	}
 }
 #endif
