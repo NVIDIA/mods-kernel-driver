@@ -75,6 +75,11 @@
 #       define MODS_HAS_PXM_TO_NODE 1
 #endif
 
+#if defined(CONFIG_PCI) && defined(CONFIG_DMA_SHARED_BUFFER) && \
+	KERNEL_VERSION(5, 8, 0) <= MODS_KERNEL_VERSION
+#       define MODS_HAS_DMABUF_EXPORT 1
+#endif
+
 #if KERNEL_VERSION(5, 10, 0) <= MODS_KERNEL_VERSION
 #       define MODS_HAS_DMA_ALLOC_PAGES 1
 #endif
@@ -101,6 +106,10 @@
 	defined(CONFIG_HAVE_ARM_SMCCC) && \
 	defined(CONFIG_ARM64)
 #       define MODS_HAS_ARM_SMCCC 1
+#endif
+
+#if KERNEL_VERSION(6, 16, 0) <= MODS_KERNEL_VERSION
+#       define MODS_HAS_MSRQ 1
 #endif
 
 #if defined(CONFIG_X86) && KERNEL_VERSION(7, 0, 0) <= MODS_KERNEL_VERSION

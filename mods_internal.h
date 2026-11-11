@@ -391,6 +391,7 @@ void mods_free_mem_reservations(void);
 int mods_enable_device(struct mods_client   *client,
 		       struct pci_dev       *dev,
 		       struct en_dev_entry **dev_entry);
+struct en_dev_entry *mods_get_enabled_device_entry(struct pci_dev *dev);
 void mods_disable_device(struct mods_client *client,
 			 struct pci_dev     *pdev);
 #endif
@@ -401,6 +402,8 @@ int mods_is_pci_dev(struct pci_dev        *dev,
 int mods_find_pci_dev(struct mods_client    *client,
 		      struct mods_pci_dev_2 *pcidev,
 		      struct pci_dev       **retdev);
+int mods_pci_bar_index_to_resource(struct pci_dev *dev, u32 bar_index,
+				   unsigned int *bar_resource_offset);
 #else
 #define mods_is_pci_dev(a, b) 0
 #define mods_find_pci_dev(a, b, c) (-ENODEV)
@@ -741,6 +744,26 @@ int esc_mods_set_qual_mode(struct mods_client *client, struct MODS_SET_QUAL_MODE
 
 int mods_qdev_enable(struct pci_dev *epdev, u8 qual_mode, void **p_qdev);
 int mods_qdev_disable(void *qdev);
+#endif
+
+#if defined(MODS_HAS_DMABUF_EXPORT)
+struct mods_dmabuf_pci_remove;
+struct mods_dmabuf_pci_reset;
+int mods_dmabuf_begin_pci_remove(struct pci_dev *dev, struct mods_dmabuf_pci_remove **pci_remove);
+void mods_dmabuf_end_pci_remove(struct mods_dmabuf_pci_remove *pci_remove);
+int mods_dmabuf_begin_pci_function_reset(struct pci_dev                *dev,
+					 struct mods_dmabuf_pci_reset **pci_reset);
+int mods_dmabuf_begin_pci_bus_reset(struct pci_bus *bus, struct mods_dmabuf_pci_reset **pci_reset);
+void mods_dmabuf_end_pci_reset(struct mods_dmabuf_pci_reset *pci_reset);
+int esc_mods_dmabuf_acquire_pci_reset_guard(struct mods_client                  *client,
+					    struct MODS_DMABUF_PCI_RESET_GUARD *p);
+int esc_mods_dmabuf_release_pci_reset_guard(struct mods_client                  *client,
+					    struct MODS_DMABUF_PCI_RESET_GUARD *p);
+void mods_dmabuf_cleanup_client_reset_guards(struct mods_client *client);
+int esc_mods_dmabuf_export_memory(struct mods_client *client, struct file *filp,
+				  void __user *user_arg, void *arg_copy, size_t arg_size);
+int esc_mods_dmabuf_acquire_release_guard(struct mods_client *client,
+					  struct MODS_DMABUF_ACQUIRE_RELEASE_GUARD *p);
 #endif
 
 #endif	/* _MODS_INTERNAL_H_  */

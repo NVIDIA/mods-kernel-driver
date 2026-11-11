@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0-only
-# SPDX-FileCopyrightText: Copyright (c) 2008-2023, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2008-2026, NVIDIA CORPORATION.  All rights reserved.
 
 # If KERNELRELEASE is defined, we've been invoked from the
 # kernel build system and can use its language.
@@ -21,6 +21,7 @@ HAVE_ARM_FFA ?=
 obj-m                            := mods.o
 mods-y                           := mods_krnl.o
 mods-y                           += mods_mem.o
+mods-$(CONFIG_DMA_SHARED_BUFFER) += mods_dmabuf_export.o
 mods-y                           += mods_irq.o
 mods-$(CONFIG_PCI)               += mods_pci.o
 mods-$(CONFIG_ACPI)              += mods_acpi.o

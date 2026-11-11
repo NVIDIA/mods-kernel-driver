@@ -4,7 +4,7 @@
 #include "mods_internal.h"
 
 #include <linux/device.h>
-#if defined(MODS_HAS_DMA_OPS)
+#if defined(MODS_HAS_DMA_OPS) || defined(MODS_HAS_DMA_MAP_RESOURCE)
 #include <linux/dma-mapping.h>
 #endif
 #include <linux/io.h>
@@ -215,9 +215,8 @@ int esc_mods_find_pci_class_code(struct mods_client              *client,
 	return err;
 }
 
-static int pci_bar_index_to_resource(struct pci_dev *dev,
-				     u32             bar_index,
-				     unsigned int   *bar_resource_offset)
+int mods_pci_bar_index_to_resource(struct pci_dev *dev, u32 bar_index,
+				   unsigned int *bar_resource_offset)
 {
 	unsigned int i;
 
@@ -262,7 +261,7 @@ int esc_mods_pci_get_bar_info_2(struct mods_client             *client,
 		 p->pci_device.function,
 		 p->bar_index);
 
-	err = pci_bar_index_to_resource(dev, p->bar_index, &bar_resource_offset);
+	err = mods_pci_bar_index_to_resource(dev, p->bar_index, &bar_resource_offset);
 	if (unlikely(err)) {
 		cl_error("invalid pci bar index %u\n", p->bar_index);
 		goto error;
@@ -608,7 +607,10 @@ int esc_mods_pci_bus_remove_dev(struct mods_client             *client,
 {
 #if !defined(MODS_HASNT_PCI_BUS_REMOVE_DEV)
 	struct pci_dev *dev;
-	int err;
+	int             err;
+#if defined(MODS_HAS_DMABUF_EXPORT)
+	struct mods_dmabuf_pci_remove *pci_remove = NULL;
+#endif
 
 	LOG_ENT();
 
@@ -632,7 +634,21 @@ int esc_mods_pci_bus_remove_dev(struct mods_client             *client,
 		 p->pci_device.device,
 		 p->pci_device.function);
 
+#if defined(MODS_HAS_DMABUF_EXPORT)
+	err = mods_dmabuf_begin_pci_remove(dev, &pci_remove);
+	if (unlikely(err)) {
+		if (err == -EBUSY)
+			cl_error("cannot remove PCI device while a DMA-BUF export is active\n");
+		goto error;
+	}
+#endif
+
 	pci_stop_and_remove_bus_device(dev);
+#if defined(MODS_HAS_DMABUF_EXPORT)
+	mods_dmabuf_end_pci_remove(pci_remove);
+
+error:
+#endif
 	pci_dev_put(dev);
 	LOG_EXT();
 	return err;
@@ -1031,6 +1047,9 @@ int esc_mods_pci_reset_bus(struct mods_client    *client,
 	struct pci_dev *dev;
 	struct pci_bus *bus;
 	int             err = 0;
+#if defined(MODS_HAS_DMABUF_EXPORT)
+	struct mods_dmabuf_pci_reset *pci_reset = NULL;
+#endif
 
 	LOG_ENT();
 
@@ -1058,6 +1077,15 @@ int esc_mods_pci_reset_bus(struct mods_client    *client,
 		goto error;
 	}
 
+#if defined(MODS_HAS_DMABUF_EXPORT)
+	err = mods_dmabuf_begin_pci_bus_reset(bus, &pci_reset);
+	if (unlikely(err)) {
+		if (err == -EBUSY)
+			cl_error("cannot reset PCI bus while a DMA-BUF export is active\n");
+		goto error;
+	}
+#endif
+
 	err = pci_bus_pm_get_all(client, bus);
 	if (err < 0)
 		goto error;
@@ -1080,6 +1108,10 @@ int esc_mods_pci_reset_bus(struct mods_client    *client,
 			pcidev->function);
 
 error:
+#if defined(MODS_HAS_DMABUF_EXPORT)
+	if (pci_reset)
+		mods_dmabuf_end_pci_reset(pci_reset);
+#endif
 	pci_dev_put(dev);
 	LOG_EXT();
 	return err;
@@ -1091,6 +1123,9 @@ int esc_mods_pci_reset_function(struct mods_client    *client,
 {
 	struct pci_dev *dev;
 	int             err;
+#if defined(MODS_HAS_DMABUF_EXPORT)
+	struct mods_dmabuf_pci_reset *pci_reset = NULL;
+#endif
 
 	LOG_ENT();
 
@@ -1105,6 +1140,16 @@ int esc_mods_pci_reset_function(struct mods_client    *client,
 		LOG_EXT();
 		return err;
 	}
+
+#if defined(MODS_HAS_DMABUF_EXPORT)
+	err = mods_dmabuf_begin_pci_function_reset(dev, &pci_reset);
+	if (unlikely(err)) {
+		if (err == -EBUSY)
+			cl_error("cannot reset dev %04x:%02x:%02x.%x while a DMA-BUF export is active\n",
+				 pcidev->domain, pcidev->bus, pcidev->device, pcidev->function);
+		goto error;
+	}
+#endif
 
 	err = check_flr(dev);
 	if (unlikely(err)) {
@@ -1141,6 +1186,10 @@ int esc_mods_pci_reset_function(struct mods_client    *client,
 			pcidev->function);
 
 error:
+#if defined(MODS_HAS_DMABUF_EXPORT)
+	if (pci_reset)
+		mods_dmabuf_end_pci_reset(pci_reset);
+#endif
 	pci_dev_put(dev);
 	LOG_EXT();
 	return err;
@@ -1274,7 +1323,7 @@ int esc_mods_pci_map_resource(struct mods_client    *client,
 		goto error;
 	}
 
-	err = pci_bar_index_to_resource(remote_dev, p->bar_index, &bar_resource_offset);
+	err = mods_pci_bar_index_to_resource(remote_dev, p->bar_index, &bar_resource_offset);
 	if (unlikely(err)) {
 		cl_error("invalid BAR index %u\n", p->bar_index);
 		goto error;
@@ -1370,7 +1419,8 @@ int esc_mods_pci_map_resource(struct mods_client    *client,
 	list_for_each_entry(cur, &client->pci_res_map_list, list) {
 		if (unlikely(check_bar_mapping(cur, local_dev, phys_addr,
 					       size))) {
-			cl_error("new mapping [0x%llx, 0x%llx) for local dev %04x:%02x:%02x.%x conflicts with existing [0x%llx, 0x%llx)\n",
+			cl_error(
+				 "new mapping [0x%llx, 0x%llx) for local dev %04x:%02x:%02x.%x conflicts with existing [0x%llx, 0x%llx)\n",
 				 (u64)phys_addr,
 				 (u64)(phys_addr + size),
 				 p->local_pci_device.domain,

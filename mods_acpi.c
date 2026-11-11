@@ -79,14 +79,16 @@ struct acpi_dev_check_context {
 static int acpi_dev_check_one(struct device *dev, void *data)
 {
 	struct acpi_dev_check_context *adwc      = data;
-	struct acpi_device            *adev      = to_acpi_device(dev);
+	struct acpi_device            *adev;
 	unsigned long long             device_id = 0;
 	acpi_status                    status;
 
-	if (!adev)
+	/* Check if parent bus matches, to ensure this child is an ACPI device object */
+	if (!dev->parent || dev->bus != dev->parent->bus)
 		/* No ACPI device corresponding to this device, continue iterating */
 		return OK;
 
+	adev   = to_acpi_device(dev);
 	status = acpi_evaluate_integer(adev->handle, "_ADR", NULL, &device_id);
 	if (ACPI_FAILURE(status))
 		/* Couldn't query device_id for this device, continue iterating */

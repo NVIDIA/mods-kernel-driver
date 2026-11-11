@@ -8,7 +8,7 @@
 
 /* Driver version */
 #define MODS_DRIVER_VERSION_MAJOR 4
-#define MODS_DRIVER_VERSION_MINOR 36
+#define MODS_DRIVER_VERSION_MINOR 37
 #define MODS_DRIVER_VERSION ((MODS_DRIVER_VERSION_MAJOR << 8) | \
 			     ((MODS_DRIVER_VERSION_MINOR / 10) << 4) | \
 			     (MODS_DRIVER_VERSION_MINOR % 10))
@@ -284,6 +284,46 @@ struct MODS_DMABUF_GET_PHYSICAL_ADDRESS {
 	/* OUT */
 	__u64 physical_address;
 	__u64 segment_size;
+};
+
+#define MODS_DMABUF_MAX_RANGES 128U
+
+struct MODS_DMABUF_EXPORT_RANGE {
+	__u64 start;
+	__u64 size;
+};
+
+/* Used by MODS_ESC_DMABUF_EXPORT_MEMORY ioctl. */
+struct MODS_DMABUF_EXPORT_MEMORY {
+	/* IN */
+	__u64                           size;
+	struct MODS_DMABUF_EXPORT_RANGE ranges[MODS_DMABUF_MAX_RANGES];
+	struct mods_pci_dev_2           pci_device;
+	__u32                           range_count;
+	/* Logical BAR index; see MODS_PCI_GET_BAR_INFO_2. */
+	__u32                           bar_index;
+	__u32                           flags;
+	/* OUT */
+	__s32                           dma_buf_fd;
+	__u32                           reserved;
+};
+
+/* Used by MODS_ESC_DMABUF_ACQUIRE_RELEASE_GUARD ioctl. */
+struct MODS_DMABUF_ACQUIRE_RELEASE_GUARD {
+	/* IN */
+	__s32 dma_buf_fd;
+	__u32 reserved;
+};
+
+#define MODS_DMABUF_PCI_RESET_SCOPE_FUNCTION 0U
+#define MODS_DMABUF_PCI_RESET_SCOPE_BUS      1U
+
+/* Used by the DMA-BUF PCI reset guard ioctls. */
+struct MODS_DMABUF_PCI_RESET_GUARD {
+	/* IN */
+	struct mods_pci_dev_2 pci_device;
+	__u32                 scope;
+	__u32                 reserved;
 };
 
 /* Used by MODS_ESC_VIRTUAL_TO_PHYSICAL ioctl.
@@ -2272,5 +2312,9 @@ struct MODS_SET_QUAL_MODE {
 #define MODS_ESC_SHARE_ALLOCATION MODSIO(W, 152, MODS_RESERVE_ALLOCATION)
 #define MODS_ESC_SET_QUAL_MODE MODSIO(W, 153, MODS_SET_QUAL_MODE)
 #define MODS_ESC_PCI_RESET_BUS MODSIO(W, 154, mods_pci_dev_2)
+#define MODS_ESC_DMABUF_EXPORT_MEMORY MODSIO(WR, 155, MODS_DMABUF_EXPORT_MEMORY)
+#define MODS_ESC_DMABUF_ACQUIRE_PCI_RESET_GUARD MODSIO(W, 156, MODS_DMABUF_PCI_RESET_GUARD)
+#define MODS_ESC_DMABUF_RELEASE_PCI_RESET_GUARD MODSIO(W, 157, MODS_DMABUF_PCI_RESET_GUARD)
+#define MODS_ESC_DMABUF_ACQUIRE_RELEASE_GUARD MODSIO(W, 158, MODS_DMABUF_ACQUIRE_RELEASE_GUARD)
 
 #endif /* _UAPI_MODS_H_  */

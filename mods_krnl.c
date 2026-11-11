@@ -210,6 +210,13 @@ static struct pci_driver mods_pci_driver = {
 	.sriov_configure = mods_pci_sriov_configure,
 #endif
 };
+
+struct en_dev_entry *mods_get_enabled_device_entry(struct pci_dev *dev)
+{
+	if (!dev || dev->driver != &mods_pci_driver)
+		return NULL;
+	return pci_get_drvdata(dev);
+}
 #endif
 
 /***********************************************
@@ -766,6 +773,14 @@ module_exit(mods_exit_module);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("NVIDIA diagnostic driver");
 
+#if defined(CONFIG_DMA_SHARED_BUFFER) && defined(MODULE_IMPORT_NS)
+#if KERNEL_VERSION(6, 13, 0) <= MODS_KERNEL_VERSION
+MODULE_IMPORT_NS("DMA_BUF");
+#else
+MODULE_IMPORT_NS(DMA_BUF);
+#endif
+#endif
+
 #define STRING_VALUE(x) #x
 #define MAKE_MODULE_VERSION(x, y) STRING_VALUE(x) "." STRING_VALUE(y)
 MODULE_VERSION(MAKE_MODULE_VERSION(MODS_DRIVER_VERSION_MAJOR, MODS_DRIVER_VERSION_MINOR));
@@ -1235,6 +1250,10 @@ static int mods_krnl_close(struct inode *ip, struct file *fp)
 
 #if defined(CONFIG_TEGRA_IVC)
 	mods_bpmpipc_cleanup();
+#endif
+
+#if defined(MODS_HAS_DMABUF_EXPORT)
+	mods_dmabuf_cleanup_client_reset_guards(client);
 #endif
 
 	mods_disable_all_devices(client);
@@ -2059,7 +2078,20 @@ static int esc_mods_read_msr(struct mods_client *client, struct MODS_MSR *p)
 
 	LOG_ENT();
 
+#ifdef MODS_HAS_MSRQ
+	{
+		u64 q = 0;
+
+		err = rdmsrq_safe_on_cpu(p->cpu_num, p->reg, &q);
+
+		if (!err) {
+			p->low  = (u32)q;
+			p->high = (u32)(q >> 32);
+		}
+	}
+#else
 	err = rdmsr_safe_on_cpu(p->cpu_num, p->reg, &p->low, &p->high);
+#endif
 	if (err)
 		cl_error("could not read MSR %u\n", p->reg);
 
@@ -2073,7 +2105,11 @@ static int esc_mods_write_msr(struct mods_client *client, struct MODS_MSR *p)
 
 	LOG_ENT();
 
+#ifdef MODS_HAS_MSRQ
+	err = wrmsrq_safe_on_cpu(p->cpu_num, p->reg, ((u64)p->high << 32) | p->low);
+#else
 	err = wrmsr_safe_on_cpu(p->cpu_num, p->reg, p->low, p->high);
+#endif
 	if (err)
 		cl_error("could not write MSR %u\n", p->reg);
 
@@ -2838,6 +2874,29 @@ static long mods_krnl_ioctl(struct file  *fp,
 #if defined(CONFIG_ARM) || defined(CONFIG_ARM64)
 	case MODS_ESC_IDLE:
 		MODS_IOCTL_NORETVAL(MODS_ESC_IDLE, esc_mods_idle, MODS_IDLE);
+		break;
+#endif
+#if defined(MODS_HAS_DMABUF_EXPORT)
+	case MODS_ESC_DMABUF_EXPORT_MEMORY:
+		err = esc_mods_dmabuf_export_memory(client, fp, arg, arg_copy, arg_size);
+		break;
+
+	case MODS_ESC_DMABUF_ACQUIRE_PCI_RESET_GUARD:
+		MODS_IOCTL_NORETVAL(MODS_ESC_DMABUF_ACQUIRE_PCI_RESET_GUARD,
+				    esc_mods_dmabuf_acquire_pci_reset_guard,
+				    MODS_DMABUF_PCI_RESET_GUARD);
+		break;
+
+	case MODS_ESC_DMABUF_RELEASE_PCI_RESET_GUARD:
+		MODS_IOCTL_NORETVAL(MODS_ESC_DMABUF_RELEASE_PCI_RESET_GUARD,
+				    esc_mods_dmabuf_release_pci_reset_guard,
+				    MODS_DMABUF_PCI_RESET_GUARD);
+		break;
+
+	case MODS_ESC_DMABUF_ACQUIRE_RELEASE_GUARD:
+		MODS_IOCTL_NORETVAL(MODS_ESC_DMABUF_ACQUIRE_RELEASE_GUARD,
+				    esc_mods_dmabuf_acquire_release_guard,
+				    MODS_DMABUF_ACQUIRE_RELEASE_GUARD);
 		break;
 #endif
 #if defined(MODS_HAS_TEGRA) && defined(CONFIG_DMA_SHARED_BUFFER)
